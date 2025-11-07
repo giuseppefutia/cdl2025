@@ -38,7 +38,7 @@ def umls_map_factory(base_importer_cls: str, backend: str):
             MATCH (icd:IcdDisease)
             WHERE icd.id = item.code
             WITH item, icd
-            MERGE (umls:UMLS {id: item.id})
+            MERGE (umls:Umls {id: item.id})
             MERGE (umls)-[:UMLS_TO_ICD]->(icd)
             SET icd.umls_ids = CASE 
                     WHEN item.id in icd.umls_ids THEN icd.umls_ids
@@ -53,7 +53,7 @@ def umls_map_factory(base_importer_cls: str, backend: str):
             MATCH (hpo:HpoPhenotype)
             WHERE hpo.id = item.code
             WITH item, hpo
-            MERGE (umls:UMLS {id: item.id})
+            MERGE (umls:Umls {id: item.id})
             MERGE (umls)-[:UMLS_TO_HPO_PHENOTYPE]->(hpo)
             SET hpo.umls_ids = CASE 
                     WHEN item.id in hpo.umls_ids THEN hpo.umls_ids
@@ -68,7 +68,7 @@ def umls_map_factory(base_importer_cls: str, backend: str):
             MATCH (dis:HpoDisease)
             WHERE dis.id = item.type_source + ':' + item.code
             WITH item, dis
-            MERGE (umls:UMLS {id: item.id})
+            MERGE (umls:Umls {id: item.id})
             MERGE (umls)-[:UMLS_TO_HPO_DISEASE]->(dis)
             SET dis.umls_ids = CASE 
                     WHEN item.id in dis.umls_ids THEN dis.umls_ids

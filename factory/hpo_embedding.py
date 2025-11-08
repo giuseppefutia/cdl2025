@@ -11,9 +11,7 @@ from util.api_client import ApiClient
 def hpo_embedding_importer_factory(base_importer_cls, backend: str, config_path: str = "config.ini"):
 
     class HpoEmbeddingImporter(base_importer_cls):
-        """Adds vector embeddings to configured node types."""
 
-        # ---- wiring ----
         def __init__(self):
             super().__init__()
             self.backend = backend

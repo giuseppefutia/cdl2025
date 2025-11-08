@@ -34,6 +34,7 @@ def load_config_api(service: Optional[str] = None, path: str = "config.ini") -> 
 
     Services:
       - "chat"      -> [chat-api]
+      - "llm"       -> [open-api]
       - "embedding" -> [embedding-api]
       - "neo4j"     -> [neo4j]
 
@@ -42,6 +43,7 @@ def load_config_api(service: Optional[str] = None, path: str = "config.ini") -> 
     svc = (service or os.getenv("API_SERVICE", "chat")).lower()
     section_map = {
         "chat": "chat-api",
+        "llm": "open-api",
         "embedding": "embedding-api",
         "neo4j": "neo4j",
     }
@@ -54,7 +56,7 @@ def load_config_api(service: Optional[str] = None, path: str = "config.ini") -> 
 
 if __name__ == "__main__":
     # Example usage
-    for s in ("chat", "embedding", "neo4j"):
+    for s in ("chat", "llm", "embedding", "neo4j"):
         try:
             print(f"{s}:", load_config_api(s))
         except Exception as e:

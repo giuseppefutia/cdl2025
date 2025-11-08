@@ -9,7 +9,7 @@ from database.neo4j_db import Neo4jGraphDB
 class Neo4jBaseImporter(Neo4jGraphDB):
     def __init__(self):
         super().__init__()
-        self.batch_size = 1
+        self.batch_size = 1000
 
     def batch_store(self, query: str, generator: Iterable, size: int = None, **kwargs):
         def batched(iterable, n):
@@ -34,7 +34,8 @@ class Neo4jBaseImporter(Neo4jGraphDB):
                     session.run(query, {"batch": batch})
 
         except Exception as e:
-            print(f"Batch insert failed: {e.with_traceback()}")
+            print(f"Batch insert failed: {e}")
+    
     def create_indices(self, indices):
         for index in indices:
             with self._driver.session(database=self._database) as session:

@@ -49,6 +49,9 @@ HPO:0001658 | Myocardial ischemia
   "support": {"evidence": "OMIM:608558 label matches exactly", "reason": "Equivalent concept"}
 
 }
+
+Keep rationale and support short (1–2 concise sentences each).
+Avoid repeating concept names or context verbatim.
 """
         },
         {

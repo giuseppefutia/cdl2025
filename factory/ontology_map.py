@@ -1,46 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import json
-import time
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Generator, Iterable, List, Optional, Sequence, Tuple
 
 from langchain_openai import ChatOpenAI
-from neo4j.exceptions import ClientError as Neo4jClientError
 
-from llm.tool import build_ontology_mapper_tool
 from util.config_loader import load_config_api
 from util.api_client import ApiClient
+from llm.utils import EmbedAPI
+from llm.tool import build_ontology_mapper_tool
 
-# Configure logging to suppress overly verbose output from libraries
+
 logging.getLogger("openai").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
+
 def ontology_mapper_factory(base_importer_cls, backend: str, config_path: str = "config.ini"):
+    """
+    Factory returning a concrete OntologyMapper bound to `base_importer_cls` and `backend`.
+    """
 
-    async def _abatch_llm(tool, payloads, max_concurrency: int = 8):
+    async def _abatch_llm(tool, payloads: List[Dict[str, Any]], max_concurrency: int = 8):
         return await tool.abatch(payloads, config={"max_concurrency": max_concurrency})
-
-    class EmbedAPI:
-        def __init__(self, api):
-            self.api = api
-
-        def embed(self, text: str) -> List[float]:
-            # returns a single embedding vector
-            r = self.api.post('/embed', {'input': [text]})
-            return r[0]['data'][0]
-
-        def embed_many(self, texts: List[str]) -> List[Sequence[float]]:
-            if not texts:
-                return []
-            resp = self.api.post('/embed', {'input': texts})
-            vectors = resp[0]["data"]
-            if len(vectors) != len(texts):
-                raise RuntimeError(f"Embedding count mismatch ({len(vectors)} != {len(texts)})")
-            return vectors
 
     @dataclass
     class Candidate:
@@ -54,18 +39,102 @@ def ontology_mapper_factory(base_importer_cls, backend: str, config_path: str = 
         best_label: Optional[str]
         confidence: float
         rationale: str
-        support: dict[str, Any]
+        support: Dict[str, Any]
 
     class OntologyMapper(base_importer_cls):
+        """ICD → HPO mapping: select candidates, build context, disambiguate, write edges."""
+
+        CYPHER_QUERY_TOPK = """
+        CALL db.index.vector.queryNodes($index, $k, $qe) YIELD node, score
+        RETURN node.id AS id, node.label AS label, score
+        ORDER BY score DESC
+        LIMIT $k
+        """
+
+        CYPHER_QUERY_TOPK_BATCH = """
+        UNWIND $items AS row
+        CALL (row) {
+          CALL db.index.vector.queryNodes($index, $k, row.qe) YIELD node, score
+          RETURN collect({id: node.id, label: node.label, score: score}) AS topk
+        }
+        RETURN row.key AS key, topk[0..$k] AS topk
+        """
+
+        CYPHER_SOURCE_CONTEXT = """
+        MATCH (d:IcdDisease {id: $id})
+        OPTIONAL MATCH (g:IcdGroup)-[:GROUP_HAS_DISEASE]->(d)
+        OPTIONAL MATCH (c:IcdChapter)-[:CHAPTER_HAS_DISEASE]->(d)
+        WITH d, collect(DISTINCT g.groupName) AS gnames, collect(DISTINCT c.chapterName) AS cnames
+        RETURN {
+          id: d.id,
+          name: d.label,
+          parentName: d.parentLabel,
+          group:   { groupName: head(gnames) },
+          chapter: { chapterName: head(cnames) }
+        } AS context
+        """
+
+        CYPHER_SOURCE_CONTEXT_BATCH = """
+        UNWIND $ids AS id
+        MATCH (d:IcdDisease {id: id})
+        OPTIONAL MATCH (g:IcdGroup)-[:GROUP_HAS_DISEASE]->(d)
+        OPTIONAL MATCH (c:IcdChapter)-[:CHAPTER_HAS_DISEASE]->(d)
+        WITH d, collect(DISTINCT g.groupName) AS gnames, collect(DISTINCT c.chapterName) AS cnames
+        RETURN d.id AS id, {
+          id: d.id,
+          name: d.label,
+          parentName: d.parentLabel,
+          group:   { groupName: head(gnames) },
+          chapter: { chapterName: head(cnames) }
+        } AS context
+        """
+
+        CYPHER_CANDIDATE_CONTEXT = """
+        MATCH (p:HpoPhenotype {id: $id})
+        RETURN {
+          id: p.id,
+          label: p.label,
+          exactSynonym: p.hasExactSynonym,
+          description: p.comment,
+          comment: p.iAO_0000115
+        } AS context
+        """
+
+        CYPHER_CANDIDATE_CONTEXT_BATCH = """
+        UNWIND $ids AS id
+        MATCH (p:HpoPhenotype {id: id})
+        RETURN p.id AS id, {
+          id: p.id,
+          label: p.label,
+          exactSynonym: p.hasExactSynonym,
+          description: p.comment,
+          comment: p.iAO_0000115
+        } AS context
+        """
 
         def __init__(self):
             super().__init__()
             self.backend = backend
-            self.batch_size = 32
-            self.cfg_emb = load_config_api("embedding", path=config_path)
-            self.emb_api = EmbedAPI(ApiClient(self.cfg_emb))
 
-            # LLM Model Initialization
+            # Tunables / defaults
+            self.batch_size: int = 32
+            self.k: int = 5
+            self.llm_threshold: float = 0.7
+            self.write_relationships: bool = True
+            self.mapper_task: str = "icd_to_hpo_phenotype"
+
+            # Labels/rel config
+            self.source_label: str = "IcdDisease"
+            self.target_label: str = "HpoPhenotype"
+            self.target_index_name: str = "hpo_phenotype_embedding"
+            self.relationship_type: str = "ICD_MAPS_TO_HPO_PHENOTYPE"
+            self.relationship_conf_prop: str = "confidence"
+
+            # Embeddings
+            cfg_emb = load_config_api("embedding", path=config_path)
+            self.emb_api = EmbedAPI(ApiClient(cfg_emb))
+
+            # LLM + tool
             url_llm = load_config_api("llm", path=config_path)
             self.llm = ChatOpenAI(
                 api_key="EMPTY",
@@ -80,57 +149,32 @@ def ontology_mapper_factory(base_importer_cls, backend: str, config_path: str = 
             )
             self.ontology_mapper_tool = build_ontology_mapper_tool(self.llm)
 
-            # Configuration parameters
-            self.source_label: str = "IcdDisease"
-            self.target_label: str = "HpoPhenotype"
-            self.target_index_name: str = "hpo_phenotype_embedding"
-            self.relationship_type: str = "ICD_MAPS_TO_HPO_PHENOTYPE"
-            self.relationship_conf_prop: str = "confidence"
-            self.llm_threshold: float = 0.7
-            self.k: int = 5
-            self.write_relationships: bool = True
-            self.mapper_task: str = "icd_to_hpo_phenotype"
+        @staticmethod
+        def _md_to_params(md: MappingDecision) -> Dict[str, Any]:
+            """Neo4j param mapping for MappingDecision (JSON-encode support)."""
+            data = asdict(md)
+            data["support"] = json.dumps(data.get("support", {}), ensure_ascii=False)
+            return {k: v for k, v in data.items() if v is not None}
 
-        def md_to_param(self, md: MappingDecision) -> Dict[str, Any]:
-            """ Convert MappingDecision dataclass to dict for Neo4j parameters. """
-            d = asdict(md)  # dataclass -> plain dict
-            d["support"] = json.dumps(d.get("support", {}), ensure_ascii=False)  # map -> JSON string
-            return {k: v for k, v in d.items() if v is not None}
-
-        ##############################################
-        ### Candidate Selection (single and batch) ###
-        ##############################################
-
-        def select_candidates(self, text) -> List[Candidate]:
+        # ##############################################
+        # ### Candidate Selection (single & batch)   ###
+        # ##############################################
+        def select_candidates(self, text: str) -> List[Candidate]:
+            """Top-K vector search for a single source text."""
             embedding = self.emb_api.embed(text)
-            query = """
-            CALL db.index.vector.queryNodes(
-                $index, $k, $qe
-            ) YIELD node, score
-            RETURN node.id AS id, node.label AS label, score
-            ORDER BY score DESC
-            LIMIT $k
-            """
             with self._driver.session(database=self._database) as session:
-                result = session.run(query,
-                                     index=self.target_index_name,
-                                     k=self.k,
-                                     qe=embedding)
-                candidates = []
-                for record in result:
-                    candidates.append(
-                        Candidate(
-                            id=record["id"],
-                            label=record["label"],
-                            score=record["score"]
-                        )
-                    )
-                return candidates
+                result = session.run(
+                    self.CYPHER_QUERY_TOPK,
+                    index=self.target_index_name,
+                    k=self.k,
+                    qe=embedding,
+                )
+                return [Candidate(id=r["id"], label=r["label"], score=r["score"]) for r in result]
 
         def select_candidates_in_batch(self, labels: List[str]) -> Dict[str, List[Candidate]]:
             """
-            labels: list of source concept labels. Example: ["Syncope and collapse", "Headache"]
-            returns: dictionary {label -> [Candidate, ...]}.
+            Batch Top-K vector search.
+            Returns: {label -> [Candidate, ...]} preserving input order.
             """
             if not labels:
                 return {}
@@ -138,355 +182,268 @@ def ontology_mapper_factory(base_importer_cls, backend: str, config_path: str = 
             embeddings = self.emb_api.embed_many(labels)
             items = [{"key": labels[i], "qe": embeddings[i]} for i in range(len(labels))]
 
-            query = """
-            UNWIND $items AS row
-            CALL (row) {
-            CALL db.index.vector.queryNodes($index, $k, row.qe)
-                YIELD node, score
-            RETURN collect({id: node.id, label: node.label, score: score}) AS topk
-            }
-            RETURN row.key AS key, topk[0..$k] AS topk
-            """
-
             out: Dict[str, List[Candidate]] = {}
             with self._driver.session(database=self._database) as session:
-                result = session.run(query, items=items, index=self.target_index_name, k=self.k)
+                result = session.run(
+                    self.CYPHER_QUERY_TOPK_BATCH,
+                    items=items,
+                    index=self.target_index_name,
+                    k=self.k,
+                )
                 for record in result:
-                    cands = [Candidate(**c) for c in record["topk"]]
-                    out[record["key"]] = cands
+                    out[record["key"]] = [Candidate(**c) for c in record["topk"]]
             return out
 
-        ############################################
-        ### Retrieve context: (single and batch) ###
-        ############################################
-
+        # ##############################################
+        # ### Context Building (single & batch)      ###
+        # ##############################################
         def build_context(self, source_id: str, candidates: List[Candidate]) -> Dict[str, Any]:
-            if self.mapper_task == "icd_to_hpo_phenotype":
-                source_context_query = """
-                MATCH (d:IcdDisease {id: $id})
-                OPTIONAL MATCH (g:IcdGroup)-[:GROUP_HAS_DISEASE]->(d)
-                OPTIONAL MATCH (c:IcdChapter)-[:CHAPTER_HAS_DISEASE]->(d)
-                WITH d,
-                     collect(DISTINCT g.groupName)   AS gnames,
-                     collect(DISTINCT c.chapterName) AS cnames
-                RETURN {
-                  id: d.id,
-                  name: d.label,
-                  parentName: d.parentLabel,
-                  group:   { groupName: head(gnames) },
-                  chapter: { chapterName: head(cnames) }
-                } AS context;
-                """
-                with self._driver.session(database=self._database) as session:
-                    result = session.run(source_context_query, id=source_id)
-                    record = result.single()
-                    source_context = record["context"] if record else {}
+            """Fetch source + candidate contexts for a single source/candidate set."""
+            if self.mapper_task != "icd_to_hpo_phenotype":
+                return {"source": {}, "candidates": []}
 
-                candidate_contexts = []
+            with self._driver.session(database=self._database) as session:
+                rec = session.run(self.CYPHER_SOURCE_CONTEXT, id=source_id).single()
+                source_ctx = rec["context"] if rec else {}
+
+            cand_ctxs: List[Dict[str, Any]] = []
+            with self._driver.session(database=self._database) as session:
                 for cand in candidates:
-                    candidate_context_query = """
-                    MATCH (p:HpoPhenotype {id: $id})
-                    RETURN {
-                      id: p.id,
-                      label: p.label,
-                      exactSynonym: p.hasExactSynonym,
-                      description: p.comment,
-                      comment: p.iAO_0000115
-                    } AS context;
-                    """
-                    with self._driver.session(database=self._database) as session:
-                        result = session.run(candidate_context_query, id=cand.id)
-                        record = result.single()
-                        cand_context = record["context"] if record else {}
-                        candidate_contexts.append(cand_context)
+                    rec = session.run(self.CYPHER_CANDIDATE_CONTEXT, id=cand.id).single()
+                    cand_ctxs.append(rec["context"] if rec else {})
 
-                return {
-                    "source": source_context,
-                    "candidates": candidate_contexts
-                }
-
-            # Default empty
-            return {"source": {}, "candidates": []}
+            return {"source": source_ctx, "candidates": cand_ctxs}
 
         def build_context_in_batch(
             self,
-            sources: List[Tuple[str, str]],  # list of (source_id, source_label)
-            cand_map: Dict[str, List[Candidate]]  # from select_candidates_in_batch
+            sources: List[Tuple[str, str]],        # [(source_id, source_label)]
+            cand_map: Dict[str, List[Candidate]],  # label -> [Candidate, ...]
         ) -> Dict[str, Dict[str, Any]]:
             """
-            Returns:
-            {
-              source_id: {
-                "source": {...},
-                "candidates": [ {...}, ... ]
-              },
-              ...
-            }
+            Return:
+              {
+                source_id: {
+                  "source": {...},
+                  "candidates": [ {...}, ... ]
+                },
+                ...
+              }
             """
             if not sources:
                 return {}
 
             source_ids = [sid for sid, _ in sources]
 
-            # 1) fetch source contexts in one query
-            q_source = """
-            UNWIND $ids AS id
-            MATCH (d:IcdDisease {id: id})
-            OPTIONAL MATCH (g:IcdGroup)-[:GROUP_HAS_DISEASE]->(d)
-            OPTIONAL MATCH (c:IcdChapter)-[:CHAPTER_HAS_DISEASE]->(d)
-            WITH d, collect(DISTINCT g.groupName) AS gnames, collect(DISTINCT c.chapterName) AS cnames
-            RETURN d.id AS id, {
-              id: d.id,
-              name: d.label,
-              parentName: d.parentLabel,
-              group:   { groupName: head(gnames) },
-              chapter: { chapterName: head(cnames) }
-            } AS context;
-            """
+            # 1) source contexts
             src_ctx: Dict[str, Dict[str, Any]] = {}
             with self._driver.session(database=self._database) as session:
-                res = session.run(q_source, ids=source_ids)
-                for r in res:
+                for r in session.run(self.CYPHER_SOURCE_CONTEXT_BATCH, ids=source_ids):
                     src_ctx[r["id"]] = r["context"]
 
-            # 2) gather ALL unique candidate ids across batch
-            all_cand_ids: List[str] = []
-            for _, label in sources:
-                for c in cand_map.get(label, []):
-                    all_cand_ids.append(c.id)
+            # 2) candidate contexts (unique ids across batch)
+            all_cand_ids = [c.id for _, lbl in sources for c in cand_map.get(lbl, [])]
             uniq_cand_ids = list(dict.fromkeys(all_cand_ids))
 
             cand_ctx_map: Dict[str, Dict[str, Any]] = {}
             if uniq_cand_ids:
-                q_cand = """
-                UNWIND $ids AS id
-                MATCH (p:HpoPhenotype {id: id})
-                RETURN p.id AS id, {
-                  id: p.id,
-                  label: p.label,
-                  exactSynonym: p.hasExactSynonym,
-                  description: p.comment,
-                  comment: p.iAO_0000115
-                } AS context
-                """
                 with self._driver.session(database=self._database) as session:
-                    res = session.run(q_cand, ids=uniq_cand_ids)
-                    for r in res:
+                    for r in session.run(self.CYPHER_CANDIDATE_CONTEXT_BATCH, ids=uniq_cand_ids):
                         cand_ctx_map[r["id"]] = r["context"]
 
             # 3) stitch per-source
             out: Dict[str, Dict[str, Any]] = {}
             for sid, label in sources:
-                cands = cand_map.get(label, [])
+                cand_list = cand_map.get(label, [])
                 out[sid] = {
                     "source": src_ctx.get(sid, {}),
-                    "candidates": [cand_ctx_map.get(c.id, {}) for c in cands],
+                    "candidates": [cand_ctx_map.get(c.id, {}) for c in cand_list],
                 }
             return out
 
-        ##################################################
-        ### Disambiguation context: (single and batch) ###
-        ##################################################
+        # ##############################################
+        # ### LLM Disambiguation (single & batch)    ###
+        # ##############################################
+        def _to_llm_payload(
+            self,
+            source_concept: str,
+            source_context: Tuple[str, Any],
+            candidate_contexts: List[Tuple[str, Any]],
+        ) -> Dict[str, Any]:
+            """LLM tool expects JSON strings for structured fields."""
+            return {
+                "source_concept": source_concept,
+                "source_context": json.dumps(source_context, ensure_ascii=False),
+                "candidate_list": json.dumps(candidate_contexts, ensure_ascii=False),
+            }
 
         def disambiguate_candidates(
             self,
             source_concept: str,
-            source_context: Dict[str, Any],
-            candidates: List[Dict[str, Any]]
+            source_context: Tuple[str, Any],
+            candidates: List[Tuple[str, Any]],
         ) -> MappingDecision:
-            payload = {
-                "source_concept": source_concept, 
-                "source_context": json.dumps(source_context, ensure_ascii=False),
-                "candidate_list": json.dumps(candidates, ensure_ascii=False),
-            }
+            """Call the LLM tool once and parse into MappingDecision."""
+            payload = self._to_llm_payload(source_concept, source_context, candidates)
             response = self.ontology_mapper_tool.invoke(payload)
             try:
                 return MappingDecision(
                     best_id=response.get("best_id"),
                     best_label=response.get("best_label"),
                     confidence=float(response.get("confidence", 0.0)),
-                    rationale=response.get("rationale", ""),
-                    support=response.get("support", {}) or {},
+                    rationale=response.get("rationale", "") or "",
+                    support=response.get("support") or {},
                 )
-            except Exception as e:
-                logging.error(f"Failed to parse LLM response: {e}")
-                return MappingDecision(
-                    best_id=None,
-                    best_label=None,
-                    confidence=0.0,
-                    rationale="Failed to parse LLM response.",
-                    support={}
-                )
+            except Exception as exc:
+                logging.error("Failed to parse LLM response: %s", exc)
+                return MappingDecision(None, None, 0.0, "Failed to parse LLM response.", {})
 
         def disambiguate_candidates_batch_sync(
             self,
-            items: Iterable[Tuple[str, dict, list]],  # (source_concept, source_context, candidate_contexts)
+            items: Iterable[Tuple[str, Tuple[str, Any], List[Tuple[str, Any]]]],  # (source_concept, source_context, candidate_contexts)
             max_concurrency: int = 8,
         ) -> List[MappingDecision]:
-            """
-            Batch version. Returns one MappingDecision per item, same order.
-            """
-            payloads = []
-            for source_concept, source_context, candidates in items:
-                payloads.append({
-                    "source_concept": source_concept,
-                    "source_context": json.dumps(source_context, ensure_ascii=False),
-                    "candidate_list": json.dumps(candidates, ensure_ascii=False),
-                })
+            """Batch LLM disambiguation. Returns one MappingDecision per input (same order)."""
+            payloads = [
+                self._to_llm_payload(source_concept, source_context, candidates)
+                for source_concept, source_context, candidates in items
+            ]
 
-            # run async abatch from sync code
             raw_responses = asyncio.run(_abatch_llm(self.ontology_mapper_tool, payloads, max_concurrency))
 
-            out: List[MappingDecision] = []
+            decisions: List[MappingDecision] = []
             for resp in raw_responses:
                 try:
-                    out.append(MappingDecision(
-                        best_id=resp.get("best_id"),
-                        best_label=resp.get("best_label"),
-                        confidence=float(resp.get("confidence", 0.0)),
-                        rationale=resp.get("rationale", ""),
-                        support=resp.get("support", {}) or {},
-                    ))
-                except Exception as e:
-                    logging.error(f"Failed to parse LLM response: {e}")
-                    out.append(MappingDecision(
-                        best_id=None,
-                        best_label=None,
-                        confidence=0.0,
-                        rationale="Failed to parse LLM response.",
-                        support={}
-                    ))
-            return out
+                    decisions.append(
+                        MappingDecision(
+                            best_id=resp.get("best_id"),
+                            best_label=resp.get("best_label"),
+                            confidence=float(resp.get("confidence", 0.0)),
+                            rationale=resp.get("rationale", "") or "",
+                            support=resp.get("support") or {},
+                        )
+                    )
+                except Exception as exc:
+                    logging.error("Failed to parse LLM response: %s", exc)
+                    decisions.append(MappingDecision(None, None, 0.0, "Failed to parse LLM response.", {}))
+            return decisions
 
-        ##############################################
-        ### End-to-end disambiguation (single/batch) ###
-        ##############################################
-
+        # ##############################################
+        # ### End-to-end runners                     ###
+        # ##############################################
         def run_disambiguation(self, source_id: str, source_label: str) -> MappingDecision:
+            """Single source disambiguation: select → context → LLM."""
             candidates = self.select_candidates(source_label)
-            context = self.build_context(source_id=source_id, candidates=candidates)
-            source_context = context.get("source", {})
-            candidate_contexts = context.get("candidates", [])
-            res_disambiguation = self.disambiguate_candidates(
+            ctx = self.build_context(source_id=source_id, candidates=candidates)
+            result = self.disambiguate_candidates(
                 source_concept=source_label,
-                source_context=source_context,
-                candidates=candidate_contexts
+                source_context=ctx.get("source", {}),
+                candidates=ctx.get("candidates", []),
             )
-            logging.debug(f"Disambiguation result: {res_disambiguation}")
-            return res_disambiguation
+            logging.debug("Disambiguation result for '%s': %s", source_label, result)
+            return result
 
         def run_disambiguation_in_batch(
             self,
-            sources: List[Tuple[str, str]],  # [(source_id, source_label), ...]
-            max_concurrency: int = 8
+            sources: List[Tuple[str, str]],  # [(source_id, source_label)]
+            max_concurrency: int = 8,
         ) -> List[Tuple[str, str, MappingDecision]]:
-            """
-            Returns a list of (source_id, source_label, MappingDecision) in the same order as `sources`.
-            """
+            """Batch disambiguation. Keeps input order in output triplets."""
             if not sources:
                 return []
 
-            # 1) Select candidates in batch using labels
+            # 1) vector candidates
             labels = [lbl for _, lbl in sources]
             cand_map = self.select_candidates_in_batch(labels)
 
-            # 2) Build contexts in batch (source + candidate contexts)
-            ctx_map = self.build_context_in_batch(sources, cand_map)  # {source_id: {"source": {...}, "candidates": [...] }}
+            # 2) graph contexts
+            ctx_map = self.build_context_in_batch(sources, cand_map)
 
-            # 3) Prepare payloads for LLM disambiguation
+            # 3) LLM inputs (preserve order)
             items = []
             for sid, lbl in sources:
                 sc = ctx_map.get(sid, {}).get("source", {})
                 cc = ctx_map.get(sid, {}).get("candidates", [])
                 items.append((lbl, sc, cc))
 
-            # 4) Batch disambiguate (sync wrapper over async abatch)
+            # 4) LLM batch
             decisions = self.disambiguate_candidates_batch_sync(items, max_concurrency=max_concurrency)
 
-            # 5) Return aligned triplets
-            out: List[Tuple[str, str, MappingDecision]] = []
-            for (sid, lbl), md in zip(sources, decisions):
-                out.append((sid, lbl, md))
-            
-            return out
+            # 5) align back
+            return [(sid, lbl, md) for (sid, lbl), md in zip(sources, decisions)]
 
-        ##############################################
-        ### Orchestration: read, filter, and write ###
-        ##############################################
-
-        def test(self):
-            # Single example (optional)
+        # ##############################################
+        # ### Orchestration: read, filter, and write ###
+        # ##############################################
+        def test(self) -> None:
+            """Quick smoke test for single + batch runs (does not write to DB)."""
             source = ("R55", "Syncope and collapse")
             res = self.run_disambiguation(source_id=source[0], source_label=source[1])
-            print(f"### Disambiguation (single) result for '{source[1]}': {res.best_id} ({res.best_label}), conf={res.confidence}")
+            print(f"### Single: '{source[1]}' → {res.best_id} ({res.best_label}), conf={res.confidence}")
 
-            # Batch example (recommended)
             sources = [("R55", "Syncope and collapse"), ("G44.1", "Vascular headache")]
-            results = self.run_disambiguation_in_batch(sources)
-            for sid, lbl, md in results:
-                print(f"### Disambiguation (batch) result for '{lbl}': {md.best_id} ({md.best_label}), conf={md.confidence}")
+            for sid, lbl, md in self.run_disambiguation_in_batch(sources):
+                print(f"### Batch:  '{lbl}' → {md.best_id} ({md.best_label}), conf={md.confidence}")
 
         def count_missing_source_nodes(self) -> int:
+            """Count source nodes not yet processed by this mapper."""
             query = f"""
             MATCH (n:{self.source_label})
             WHERE NOT "ProcessedWithOntologyMapper" IN labels(n)
             RETURN count(n) AS cnt
             """
             with self._driver.session(database=self._database) as session:
-                result = session.run(query)
-                record = result.single()
-                return record["cnt"] if record else 0
+                rec = session.run(query).single()
+                return rec["cnt"] if rec else 0
 
-        def get_source_nodes(self) -> Generator[Dict[str, str]]:
+        def get_source_nodes(self) -> Generator[Dict[str, Any], None, None]:
+            """
+            Stream source nodes (single-disambiguation path).
+            Prefer `get_source_nodes_in_batch` for efficiency.
+            """
             query = f"""
             MATCH (n:{self.source_label})
             WHERE NOT n:ProcessedWithOntologyMapper
             RETURN n.id AS id, coalesce(n.label, n.name) AS label
             """
             with self._driver.session(database=self._database) as session:
-                result = session.run(query)
-                for record in result:
-                    print(record)
-                    md = self.run_disambiguation(
-                        source_id=record["id"],
-                        source_label=record["label"]
-                    )
+                for record in session.run(query):
+                    md = self.run_disambiguation(source_id=record["id"], source_label=record["label"])
                     if md.confidence >= self.llm_threshold:
                         yield {
                             "id": record["id"],
                             "label": record["label"],
-                            "disambiguation_result": self.md_to_param(md)
+                            "disambiguation_result": self._md_to_params(md),
                         }
-        
+
         def get_source_nodes_in_batch(self, batch_size: int = 8) -> Generator[Dict[str, Any], None, None]:
-            """
-            Streams items, but performs selection/context/LLM disambiguation in batches.
-            """
+            """Stream nodes but perform selection/context/LLM steps in batches."""
             query = f"""
             MATCH (n:{self.source_label})
             WHERE NOT "ProcessedWithOntologyMapper" IN labels(n)
             RETURN n.id AS id, n.label AS label
             """
-            rows: List[Tuple[str, str]] = []
+
             with self._driver.session(database=self._database) as session:
-                for rec in session.run(query):
-                    rows.append((rec["id"], rec["label"]))
+                rows: List[Tuple[str, str]] = [(rec["id"], rec["label"]) for rec in session.run(query)]
 
-            # chunk and process
             for i in range(0, len(rows), batch_size):
-                chunk = rows[i:i + batch_size]  # List[(id, label)]
-                results = self.run_disambiguation_in_batch(chunk, max_concurrency=8)
-
-                for (sid, lbl, md) in results:
+                chunk = rows[i : i + batch_size]
+                for sid, lbl, md in self.run_disambiguation_in_batch(chunk, max_concurrency=8):
                     if md.confidence >= self.llm_threshold:
                         yield {
                             "id": sid,
                             "label": lbl,
-                            "disambiguation_result": self.md_to_param(md),
+                            "disambiguation_result": self._md_to_params(md),
                         }
-    
-        def merge_mapping_relationship(self):
-            logging.info(f"Merging mapping relationship: {self.source_label} -> {self.target_label} [{self.relationship_type}]")
+
+        def merge_mapping_relationship(self) -> None:
+            """Write mapping edges and mark sources as processed."""
+            logging.info(
+                "Merging mapping relationship: %s -> %s [%s]",
+                self.source_label,
+                self.target_label,
+                self.relationship_type,
+            )
             query = f"""
             UNWIND $batch AS item
             MATCH (source:{self.source_label} {{id: item.id}})
@@ -497,11 +454,13 @@ def ontology_mapper_factory(base_importer_cls, backend: str, config_path: str = 
                 r.support = item.disambiguation_result.support
             SET source:ProcessedWithOntologyMapper
             """
-            size = self.count_missing_source_nodes()
-            # get_source_nodes() now performs batch disambiguation under the hood
-            self.batch_store(query, self.get_source_nodes_in_batch(), size=size)
 
-        def apply_updates(self):
+            total = self.count_missing_source_nodes()
+            # get_source_nodes_in_batch streams items lazily, already batched internally.
+            self.batch_store(query, self.get_source_nodes_in_batch(), size=total)
+
+        def apply_updates(self) -> None:
+            """Entrypoint used by the CLI importer."""
             logging.info("Testing Ontology Mapper...")
             self.test()
             print("\n\n\n")
@@ -511,7 +470,7 @@ def ontology_mapper_factory(base_importer_cls, backend: str, config_path: str = 
     return OntologyMapper
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     from util.cli_entry import run_backend_importer
 
     run_backend_importer(
@@ -519,5 +478,5 @@ if __name__ == '__main__':
         description="Run Ontology Mapper.",
         file_help="No file needed for ontology mapping.",
         default_base_path="./data/",
-        require_file=False
+        require_file=False,
     )

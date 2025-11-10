@@ -2,9 +2,9 @@
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-###########################################
-### Ontology Mapping LLM Pydantic Models ##
-###########################################
+###############################
+### Ontology Mapping Models ###
+###############################
 
 class OntologyMappingInput(BaseModel):
     source_concept: str
@@ -21,3 +21,62 @@ class OntologyMappingResponse(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     rationale: str
     support: SupportItem
+
+##########################
+### NER Patient Models ###
+##########################
+
+class PatientNERInput(BaseModel):
+    icd_chapters: List[str]
+    patient_id: str
+    encounter_id: str
+    concat_text: str
+    narrative_text: str
+
+class PatientNEREntity(BaseModel):
+    source: str        # "concat" or "narrative"
+    start: int         # 0-based [start, end)
+    end: int
+    text: str
+    label: str         # must be one of icd_chapters
+    assertion: str     # "present" | "negated" | "uncertain"
+    temporality: str   # "acute" | "chronic" | "recurrent" | "history" | "unspecified"
+    rationale: str
+
+class PatientNERResponse(BaseModel):
+    patient_id: str
+    encounter_id: str
+    entities: List[PatientNEREntity] = Field(default_factory=list)
+
+###################
+### Patient NED ###
+###################
+
+class PatientNEDCandidate(BaseModel):
+    score: float = Field(ge=0.0, le=1.0)
+    id: str                 # e.g., "F32.0"
+    label: str              # e.g., "Mild depressive episode"
+
+class PatientNEDOtherMention(BaseModel):
+    text: str
+    label: str              # ICD Chapter label for the other mention
+
+class PatientNEDInput(BaseModel):
+    """
+    Input to Patient NED:
+    - mention: the single target mention to link (reuse PatientNEREntity).
+    - candidates: ranked list of candidate ICD codes.
+    - other_mentions: context mentions for collective disambiguation (optional).
+    """
+    mention: PatientNEREntity
+    candidates: List[PatientNEDCandidate]
+    other_mentions: List[PatientNEDOtherMention] = Field(default_factory=list)
+
+class PatientNEDResponse(PatientNEREntity):
+    """
+    Output: original mention fields plus chosen ICD code/label.
+    """
+    icd_id: Optional[str] = None        # e.g., "R45.2"; None if abstaining
+    icd_label: Optional[str] = None     # e.g., "Unhappiness"; None if abstaining
+    confidence: float = Field(default=None, ge=0.0, le=1.0)
+    linking_rationale: str

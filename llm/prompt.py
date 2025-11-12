@@ -136,17 +136,19 @@ Hard limits:
 PATIENT_NER_PROMPT = {
   "system": """
 You are an expert clinical NER annotator.
-Your task is to label disorder/problem mentions in clinical text using ONLY the ICD Chapter labels provided.
 
-INPUTS:
-- ICD_CHAPTERS: list of allowable labels (from Neo4j). Examples:
-  "Endocrine, nutritional and metabolic diseases",
-  "Diseases of the respiratory system",
-  "Diseases of the musculoskeletal system and connective tissue",
-  "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified", etc.
+GOAL:
+Extract **ALL** disorder/problem mentions (diagnoses, disorders, and symptoms/signs) from BOTH the concatenated encounter summary and the clinical narrative.
 
+SOURCES:
 - CONCAT_TEXT: concatenation of Encounter.reasonCode + ChiefComplaint + Condition (in that order, separated by " | ").
 - NARRATIVE_TEXT: the encounter narrative.
+
+You must examine **both** texts independently and return entities from each.
+If any problem, symptom, or diagnosis appears in the narrative (even if also seen in CONCAT_TEXT), it must be included again with `"source": "narrative"` and correct character indices for the narrative.
+
+ALLOWED LABELS:
+Exactly the strings given in ICD_CHAPTERS.
 
 OUTPUT FORMAT (STRICT JSON):
 {
@@ -167,246 +169,169 @@ OUTPUT FORMAT (STRICT JSON):
 }
 
 ANNOTATION RULES:
-- Match by meaning, not wording.
-- Use contiguous spans found verbatim in the text (0-based [start, end) indices).
-- Choose the most specific phrase that represents a clinical condition, symptom, or disorder.
-- Mark negated or uncertain mentions using 'assertion'.
-- Determine temporality when clear; otherwise, 'unspecified'.
-- Use ICD Chapters **exactly as provided**, no abbreviation or modification.
-- Do not annotate medications, tests, vitals, or administrative details.
-- If no entities apply, return "entities": [].
-- Keep rationale concise (≤1 sentence).
+- **Exhaustive extraction:** Return all valid entities from both sources.
+- **Independent review:** Treat `concat` and `narrative` as separate documents—annotate both.
+- **Verbatim spans:** Use contiguous substrings found verbatim, with 0-based [start, end) indices.
+- **Split coordinated mentions:** “palpitations and dizziness” → separate spans.
+- **Assertion:** Detect negated (“denies X”) or uncertain (“possible X”) expressions.
+- **Temporality:** acute/chronic/history when stated, otherwise “unspecified.”
+- **ICD Chapter mapping:** Use exact ICD chapter strings from ICD_CHAPTERS.
+- **No non-problems:** Skip medications, tests, vitals, or procedures.
+- **Duplication policy:** If the same mention occurs in both texts, keep **two entries**—one for each source.
+- **Narrative coverage check:** If no entities are found from the narrative, review again; there are almost always mentions there.
+
 """,
 
   "examples": [
     {
       "user": """
 ICD_CHAPTERS:
-- Endocrine, nutritional and metabolic diseases
-- Diseases of the respiratory system
+- Diseases of the circulatory system
 - Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified
 
-patient_id: P010
-encounter_id: E021
+patient_id: P001
+encounter_id: E001
 
 CONCAT_TEXT:
-Excessive thirst and fatigue | Constant tiredness and dry mouth | Type 2 diabetes mellitus
+Palpitations and lightheadedness | Fluttering heartbeat and fatigue | Paroxysmal atrial fibrillation
 
 NARRATIVE_TEXT:
-The patient reported several months of increased thirst and urination, accompanied by fatigue. Laboratory testing revealed elevated fasting glucose, consistent with type 2 diabetes mellitus.
+The patient, aged 60, presented with several days of fluttering sensations in his chest, particularly noticeable during mild exertion. He described a racing pulse, occasional dizziness, and fatigue but denied chest pain. ECG demonstrated paroxysmal atrial fibrillation with rapid ventricular response. There were no signs of heart failure or ischemia.
 """,
       "assistant": """
 {
-  "patient_id": "P010",
-  "encounter_id": "E021",
+  "patient_id": "P001",
+  "encounter_id": "E001",
   "entities": [
-    {
-      "source": "concat",
-      "start": 70,
-      "end": 94,
-      "text": "Type 2 diabetes mellitus",
-      "label": "Endocrine, nutritional and metabolic diseases",
-      "assertion": "present",
-      "temporality": "chronic",
-      "rationale": "Definitive diagnosis of an endocrine disorder."
-    },
     {
       "source": "concat",
       "start": 0,
-      "end": 29,
-      "text": "Excessive thirst and fatigue",
+      "end": 11,
+      "text": "Palpitations",
       "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
       "assertion": "present",
-      "temporality": "chronic",
-      "rationale": "Symptom-level description without diagnosis."
-    }
-  ]
-}
-"""
+      "temporality": "unspecified",
+      "rationale": "Reported symptom."
     },
     {
-      "user": """
-ICD_CHAPTERS:
-- Diseases of the respiratory system
-- Certain infectious and parasitic diseases
-- Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified
-
-patient_id: P012
-encounter_id: E033
-
-CONCAT_TEXT:
-Persistent cough and fever | Productive cough with green sputum | Community-acquired pneumonia
-
-NARRATIVE_TEXT:
-She presented with a week of fever, chills, and productive cough. Chest X-ray confirmed right lower lobe consolidation, consistent with community-acquired pneumonia.
-""",
-      "assistant": """
-{
-  "patient_id": "P012",
-  "encounter_id": "E033",
-  "entities": [
+      "source": "concat",
+      "start": 16,
+      "end": 31,
+      "text": "lightheadedness",
+      "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
+      "assertion": "present",
+      "temporality": "unspecified",
+      "rationale": "Reported symptom."
+    },
     {
       "source": "concat",
-      "start": 74,
-      "end": 102,
-      "text": "Community-acquired pneumonia",
-      "label": "Diseases of the respiratory system",
+      "start": 34,
+      "end": 54,
+      "text": "Fluttering heartbeat",
+      "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
+      "assertion": "present",
+      "temporality": "unspecified",
+      "rationale": "Reported symptom."
+    },
+    {
+      "source": "concat",
+      "start": 59,
+      "end": 66,
+      "text": "fatigue",
+      "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
+      "assertion": "present",
+      "temporality": "unspecified",
+      "rationale": "Reported symptom."
+    },
+    {
+      "source": "concat",
+      "start": 69,
+      "end": 98,
+      "text": "Paroxysmal atrial fibrillation",
+      "label": "Diseases of the circulatory system",
       "assertion": "present",
       "temporality": "acute",
-      "rationale": "Respiratory infection confirmed radiographically."
+      "rationale": "Confirmed ECG diagnosis."
     },
     {
       "source": "narrative",
-      "start": 29,
-      "end": 43,
-      "text": "productive cough",
+      "start": 43,
+      "end": 64,
+      "text": "fluttering sensations",
+      "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
+      "assertion": "present",
+      "temporality": "unspecified",
+      "rationale": "Symptom described by patient."
+    },
+    {
+      "source": "narrative",
+      "start": 108,
+      "end": 120,
+      "text": "racing pulse",
       "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
       "assertion": "present",
       "temporality": "acute",
-      "rationale": "Symptom describing the illness presentation."
-    }
-  ]
-}
-"""
-    },
-    {
-      "user": """
-ICD_CHAPTERS:
-- Diseases of the musculoskeletal system and connective tissue
-- Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified
-
-patient_id: P014
-encounter_id: E045
-
-CONCAT_TEXT:
-Knee pain and stiffness | Aching knees when climbing stairs | Osteoarthritis of the knee
-
-NARRATIVE_TEXT:
-He described gradual worsening of knee discomfort over the past year, especially when walking or standing for long periods. Imaging confirmed degenerative osteoarthritis.
-""",
-      "assistant": """
-{
-  "patient_id": "P014",
-  "encounter_id": "E045",
-  "entities": [
-    {
-      "source": "concat",
-      "start": 66,
-      "end": 91,
-      "text": "Osteoarthritis of the knee",
-      "label": "Diseases of the musculoskeletal system and connective tissue",
-      "assertion": "present",
-      "temporality": "chronic",
-      "rationale": "Degenerative joint disease confirmed radiographically."
-    },
-    {
-      "source": "concat",
-      "start": 0,
-      "end": 20,
-      "text": "Knee pain and stiffness",
-      "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
-      "assertion": "present",
-      "temporality": "chronic",
-      "rationale": "Symptomatic presentation of musculoskeletal disorder."
-    }
-  ]
-}
-"""
-    },
-    {
-      "user": """
-ICD_CHAPTERS:
-- Mental and behavioural disorders
-- Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified
-
-patient_id: P016
-encounter_id: E057
-
-CONCAT_TEXT:
-Low mood and poor concentration | Feeling down and fatigued | Mild depressive episode
-
-NARRATIVE_TEXT:
-Patient reported persistent low mood and reduced motivation for several months. Denied suicidal thoughts. Diagnosed with mild depressive episode.
-""",
-      "assistant": """
-{
-  "patient_id": "P016",
-  "encounter_id": "E057",
-  "entities": [
-    {
-      "source": "concat",
-      "start": 61,
-      "end": 82,
-      "text": "Mild depressive episode",
-      "label": "Mental and behavioural disorders",
-      "assertion": "present",
-      "temporality": "chronic",
-      "rationale": "Explicit psychiatric diagnosis per criteria."
+      "rationale": "Symptom indicating tachyarrhythmia."
     },
     {
       "source": "narrative",
-      "start": 8,
-      "end": 16,
-      "text": "low mood",
+      "start": 122,
+      "end": 140,
+      "text": "occasional dizziness",
       "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
       "assertion": "present",
-      "temporality": "chronic",
-      "rationale": "Symptom description rather than disorder."
+      "temporality": "unspecified",
+      "rationale": "Symptom mentioned explicitly."
     },
     {
       "source": "narrative",
-      "start": 72,
-      "end": 95,
-      "text": "Denied suicidal thoughts",
-      "label": "Mental and behavioural disorders",
+      "start": 146,
+      "end": 153,
+      "text": "fatigue",
+      "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
+      "assertion": "present",
+      "temporality": "unspecified",
+      "rationale": "Repeated symptom in narrative."
+    },
+    {
+      "source": "narrative",
+      "start": 165,
+      "end": 176,
+      "text": "chest pain",
+      "label": "Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified",
       "assertion": "negated",
       "temporality": "unspecified",
-      "rationale": "Negated symptom within psychiatric context."
-    }
-  ]
-}
-"""
+      "rationale": "Explicitly denied symptom."
     },
     {
-      "user": """
-ICD_CHAPTERS:
-- Diseases of the skin and subcutaneous tissue
-- Certain infectious and parasitic diseases
-- Symptoms, signs and abnormal clinical and laboratory findings, not elsewhere classified
-
-patient_id: P018
-encounter_id: E063
-
-CONCAT_TEXT:
-Painful red rash on arm | Burning sensation and swelling | Cellulitis of upper limb
-
-NARRATIVE_TEXT:
-A rapidly spreading, tender rash was noted on the right forearm, with mild swelling and warmth. The patient was afebrile. Clinical impression: cellulitis of the upper limb.
-""",
-      "assistant": """
-{
-  "patient_id": "P018",
-  "encounter_id": "E063",
-  "entities": [
-    {
-      "source": "concat",
-      "start": 67,
-      "end": 89,
-      "text": "Cellulitis of upper limb",
-      "label": "Certain infectious and parasitic diseases",
+      "source": "narrative",
+      "start": 196,
+      "end": 226,
+      "text": "paroxysmal atrial fibrillation",
+      "label": "Diseases of the circulatory system",
       "assertion": "present",
       "temporality": "acute",
-      "rationale": "Bacterial skin infection under infectious diseases."
+      "rationale": "Confirmed ECG finding."
     },
     {
-      "source": "concat",
-      "start": 0,
-      "end": 24,
-      "text": "Painful red rash on arm",
-      "label": "Diseases of the skin and subcutaneous tissue",
-      "assertion": "present",
-      "temporality": "acute",
-      "rationale": "Primary skin manifestation of infection."
+      "source": "narrative",
+      "start": 285,
+      "end": 299,
+      "text": "heart failure",
+      "label": "Diseases of the circulatory system",
+      "assertion": "negated",
+      "temporality": "unspecified",
+      "rationale": "Explicitly denied condition."
+    },
+    {
+      "source": "narrative",
+      "start": 303,
+      "end": 311,
+      "text": "ischemia",
+      "label": "Diseases of the circulatory system",
+      "assertion": "negated",
+      "temporality": "unspecified",
+      "rationale": "Explicitly denied condition."
     }
   ]
 }
@@ -615,12 +540,12 @@ OTHER_MENTIONS:
 
   "user": """
 MENTION:
-{{ mention_json }}
+{{ mention }}
 
 CANDIDATES:
-{{ candidates_json }}   // array of {"score": number, "label": "str", "id": "ICD code"}
+{{ candidates }}   // array of {"score": number, "label": "str", "id": "ICD code"}
 
 OTHER_MENTIONS:
-{{ other_mentions_json }}
+{{ other_mentions }}   // array of {"text": "str", "label": "str"}
 """
 }

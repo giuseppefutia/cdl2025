@@ -5,7 +5,10 @@ import json
 from llm.pydantic_model import (
     OntologyMappingInput,
     PatientNERInput,
+    PatientNEREntity,
     PatientNEDInput,
+    PatientNEDCandidate,
+    PatientNEDOtherMention,
 )
 from llm.chain import (
     ontology_mapping_chain,
@@ -62,29 +65,15 @@ def build_patient_ned_tool(llm):
 
     @tool("patient_ned", args_schema=PatientNEDInput)
     def patient_ned_tool(
-        mention,
-        candidates: List,
-        other_mentions: List = []
+        mention: PatientNEREntity,
+        candidates: list[PatientNEDCandidate],
+        other_mentions: list[PatientNEDOtherMention] = [],
     ):
-        """
-        Link a single mention to the best ICD code from the provided candidates.
-        Returns the original mention fields plus `icd_id`/`icd_label` (and optional confidence/rationale).
-        """
-        # Ensure JSON strings for Jinja placeholders used in PATIENT_NED_PROMPT["user"]
-        def _dump(obj):
-            # Pydantic model or plain dict/list
-            if hasattr(obj, "model_dump"):
-                return json.dumps(obj.model_dump(), ensure_ascii=False)
-            return json.dumps(obj, ensure_ascii=False)
-
-        mention_json = _dump(mention)
-        candidates_json = _dump([c.model_dump() if hasattr(c, "model_dump") else c for c in candidates])
-        other_mentions_json = _dump([m.model_dump() if hasattr(m, "model_dump") else m for m in other_mentions])
-
+        """Disambiguate a medical mention to the best ICD code candidate and return a structured result."""
         result = chain.invoke({
-            "mention_json": mention_json,
-            "candidates_json": candidates_json,
-            "other_mentions_json": other_mentions_json,
+            "mention": mention,
+            "candidates": candidates,
+            "other_mentions": other_mentions,
         })
         return result.model_dump()
 

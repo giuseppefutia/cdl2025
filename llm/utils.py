@@ -1,6 +1,4 @@
 from util.api_client import ApiClient
-from util.config_loader import load_config_api
-
 from typing import List, Sequence
 
 class EmbedAPI:

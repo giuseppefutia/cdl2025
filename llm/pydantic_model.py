@@ -62,20 +62,11 @@ class PatientNEDOtherMention(BaseModel):
     label: str              # ICD Chapter label for the other mention
 
 class PatientNEDInput(BaseModel):
-    """
-    Input to Patient NED:
-    - mention: the single target mention to link (reuse PatientNEREntity).
-    - candidates: ranked list of candidate ICD codes.
-    - other_mentions: context mentions for collective disambiguation (optional).
-    """
     mention: PatientNEREntity
     candidates: List[PatientNEDCandidate]
     other_mentions: List[PatientNEDOtherMention] = Field(default_factory=list)
 
 class PatientNEDResponse(PatientNEREntity):
-    """
-    Output: original mention fields plus chosen ICD code/label.
-    """
     icd_id: Optional[str] = None        # e.g., "R45.2"; None if abstaining
     icd_label: Optional[str] = None     # e.g., "Unhappiness"; None if abstaining
     confidence: float = Field(default=None, ge=0.0, le=1.0)

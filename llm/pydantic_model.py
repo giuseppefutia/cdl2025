@@ -1,5 +1,5 @@
 
-from typing import List, Optional
+from typing import Any, Dict, Literal, List, Optional
 from pydantic import BaseModel, Field
 
 ###############################
@@ -71,3 +71,34 @@ class PatientNEDResponse(PatientNEREntity):
     icd_label: Optional[str] = None     # e.g., "Unhappiness"; None if abstaining
     confidence: float = Field(default=None, ge=0.0, le=1.0)
     linking_rationale: str
+
+##################
+### RAG Models ###
+##################
+
+class Property(BaseModel):
+    node_label: str
+    property_key: str
+    property_value: str
+
+class ValidationError(BaseModel):
+    type: Literal["syntax", "label", "relationship", "property", "variable", "semantic", "structure"]
+    message: str
+    suggestion: Optional[str] = ""
+
+class ValidateCypherOutput(BaseModel):
+    errors: List[ValidationError] = Field(default_factory=list)
+
+class DiagnoseCypherOutput(BaseModel):
+    issues: List[str]
+    suggestions: List[str]
+    fixed_cypher: Optional[str] = None
+
+class GeneralMedicalInput(BaseModel):
+    question: str
+    top_k: Optional[int] = 20
+
+class GeneralMedicalResponse(BaseModel):
+    cypher: str
+    rows: List[Dict[str, Any]]
+    steps: List[str] = []

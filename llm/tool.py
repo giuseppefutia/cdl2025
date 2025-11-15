@@ -1,6 +1,9 @@
 from typing import List
+
 from langchain_core.tools import tool
-import json
+from langchain_openai import ChatOpenAI
+
+from llm.prompt import NEO4J_SCHEMA
 
 from llm.pydantic_model import (
     OntologyMappingInput,
@@ -9,12 +12,17 @@ from llm.pydantic_model import (
     PatientNEDInput,
     PatientNEDCandidate,
     PatientNEDOtherMention,
+    GeneralMedicalInput,
+    GeneralMedicalResponse,
 )
 from llm.chain import (
     ontology_mapping_chain,
     patient_ner_chain,
     patient_ned_chain,
 )
+
+from llm.pipeline import text2cypher_pipeline, enhanced_graph
+
 
 def build_ontology_mapper_tool(llm):
     chain = ontology_mapping_chain(llm)
@@ -78,3 +86,21 @@ def build_patient_ned_tool(llm):
         return result.model_dump()
 
     return patient_ned_tool
+
+
+def build_general_medical_tool(llm: ChatOpenAI):
+    
+    @tool("general_medical_executor", args_schema=GeneralMedicalInput)
+    def general_medical_executor(
+        question: str,
+        top_k: int = 20
+    ):
+        """General medical: schema-aware Text→Cypher with validation/correction."""
+        cypher, rows = text2cypher_pipeline(llm, question, debug=True)
+        
+        if isinstance(rows, list) and top_k is not None:
+            rows = rows[: int(top_k)]
+
+        return GeneralMedicalResponse(cypher=cypher, rows=rows, steps=["text2cypher", "validated", "executed"]).model_dump()
+
+    return general_medical_executor

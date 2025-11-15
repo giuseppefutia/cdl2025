@@ -1,3 +1,7 @@
+########################
+### Building prompts ###
+########################
+
 ONTOLOGY_MAPPING_PROMPT = {
     "system": """
 You are an expert in medical ontology mapping.
@@ -548,4 +552,418 @@ CANDIDATES:
 OTHER_MENTIONS:
 {{ other_mentions }}   // array of {"text": "str", "label": "str"}
 """
+}
+
+#########################
+### Retrieval prompts ###
+#########################
+
+NEO4J_SCHEMA = """
+You are working with a property graph that has the following node labels, properties, and relationships.
+Use ONLY the labels, relationship types, and properties defined below.
+
+NODE LABELS
+===========
+
+1) :HpoDisease
+   Description: Disease entity from the Human Phenotype Ontology (HPO) database, identified by an OMIM identifier, and associated with various UMLS identifiers.
+   Properties:
+     - id: STRING              // e.g. "OMIM:619340"
+     - label: STRING           // e.g. "Developmental and epileptic encephalopathy 96"
+     - umls_ids: LIST<STRING>  // size 1–2, e.g. ["C4024761", "C4024762"]
+
+2) :HpoPhenotype
+   Description: Phenotypic feature/characteristic in HPO, identified by HP identifier and linked to UMLS concepts.
+   Properties:
+     - uri: STRING             // e.g. "http://purl.obolibrary.org/obo/HP_0000001"
+     - id: STRING              // e.g. "HP:0000001"
+     - hasDbXref: STRING       // e.g. "UMLS:C0444868"
+     - iAO_0000115: STRING     // textual definition, e.g. "Abnormality of the male genital system."
+     - hasExactSynonym: STRING // e.g. "Abnormality of the male genitalia"
+     - label: STRING           // e.g. "Abnormality of the male genital system"
+     - creation_date: STRING   // ISO datetime, e.g. "2009-09-15T08:33:20Z"
+     - umls_ids: LIST<STRING>  // size 1–1
+     - hasNarrowSynonym: STRING // e.g. "Malformation of facial soft tissue"
+     - comment: STRING          // e.g. "Root of all terms in the Human Phenotype Ontology."
+
+3) :IcdDisease
+   Description: Disease classified in ICD, identified by ICD code and associated with UMLS identifiers.
+   Properties:
+     - id: STRING              // e.g. "A00"
+     - label: STRING           // e.g. "Cholera"
+     - chapter: STRING         // e.g. "01"
+     - group: STRING           // e.g. "A00"
+     - parentLabel: STRING     // e.g. "Cholera"
+     - umls_ids: LIST<STRING>  // size 1–4
+
+4) :IcdChapter
+   Description: ICD chapter grouping related diseases.
+   Properties:
+     - id: STRING              // e.g. "01"
+     - chapterName: STRING     // e.g. "Certain infectious and parasitic diseases"
+
+5) :IcdGroup
+   Description: Group within an ICD chapter that categorizes diseases.
+   Properties:
+     - id: STRING              // e.g. "01"
+     - groupName: STRING       // e.g. "Other infectious diseases"
+     - diseaseRange: LIST<STRING> // size 1–21
+
+6) :UMLS
+   Description: Concept from the Unified Medical Language System (UMLS).
+   Properties:
+     - id: STRING              // e.g. "C0000727"
+
+RELATIONSHIP TYPES
+==================
+
+1) :HAS_PHENOTYPIC_FEATURE
+   Pattern: (:HpoDisease)-[:HAS_PHENOTYPIC_FEATURE]->(:HpoPhenotype)
+   Properties:
+     - source: STRING              // e.g. "PMID:31675180"
+     - evidence: STRING            // e.g. "PCS"
+     - aspect: STRING              // e.g. "I"
+     - biocuration: STRING         // e.g. "HPO:probinson[2021-06-21];HPO:probinson[2021-06-21"
+     - createdBy: STRING           // e.g. "probinson"
+     - creationDate: STRING        // e.g. "2021-06-21"
+     - aspectName: STRING          // e.g. "Inheritance"
+     - aspectDescription: STRING   // e.g. "Terms with the I aspect are from the Inheritance s"
+     - evidenceName: STRING        // e.g. "Published clinical study"
+     - evidenceDescription: STRING // e.g. "PCS is used for information extracted from article"
+     - url: STRING                 // e.g. "https://pubmed.ncbi.nlm.nih.gov/31675180"
+     - frequency: STRING           // e.g. "1/2"
+     - onset: STRING               // may be empty
+     - modifier: STRING            // may be empty
+     - sex: STRING                 // may be empty
+
+2) :ICD_MAPS_TO_HPO_PHENOTYPE
+   Pattern: (:IcdDisease)-[:ICD_MAPS_TO_HPO_PHENOTYPE]->(:HpoPhenotype)
+   Properties:
+     - confidence: FLOAT           // e.g. 0.7
+     - rationale: STRING           // e.g. "Cholera is a cause of diarrhea."
+     - support: STRING             // e.g. JSON-like text, e.g. "{"evidence": "Cholera is a cause of diarrhea.", "r"
+
+3) :SUBCLASSOF
+   Pattern: (:HpoPhenotype)-[:SUBCLASSOF]->(:HpoPhenotype)
+
+4) :HAS_CHILD
+   Pattern: (:IcdDisease)-[:HAS_CHILD]->(:IcdDisease)
+
+5) :CHAPTER_HAS_DISEASE
+   Pattern: (:IcdChapter)-[:CHAPTER_HAS_DISEASE]->(:IcdDisease)
+
+6) :GROUP_IN_CHAPTER
+   Pattern: (:IcdGroup)-[:GROUP_IN_CHAPTER]->(:IcdChapter)
+
+7) :GROUP_HAS_DISEASE
+   Pattern: (:IcdGroup)-[:GROUP_HAS_DISEASE]->(:IcdDisease)
+
+RULES FOR YOU (THE MODEL)
+=========================
+
+- Only use node labels, relationship types, and properties exactly as defined above.
+- Respect the relationship directions and node label combinations.
+- When referring to a property, use its exact name (e.g. "creation_date", not "created_at").
+- When using umls_ids, treat them as arrays/lists of strings.
+- Unless otherwise specified, assume all STRING properties are optional and may be missing.
+- Ensure all Cypher queries you generate are syntactically correct and executable in Neo4j.
+"""
+
+TEXT_2_CYPHER_PROMPT = {
+  "system": """
+You are a Neo4j expert assistant. Your task is to convert natural language questions into valid, executable Cypher queries.
+
+General rules:
+- Respond with ONLY the Cypher query.
+- Do NOT include any preamble, explanation, comments, or markdown (no backticks).
+- Ensure the Cypher query is syntactically correct and complete.
+- Use ONLY the node labels, relationship types, and properties that appear in the provided schema.
+- Do NOT invent new labels, relationship types, or properties.
+- Respect relationship directions exactly as given in the schema.
+- Prefer the simplest possible pattern that answers the question.
+- Do NOT involve :UMLS nodes or UMLS_* relationships unless the user explicitly mentions UMLS, CUIs, or cross-mapping via UMLS.
+- For questions about which diseases have certain phenotypes, use the direct pattern:
+  (d:HpoDisease)-[:HAS_PHENOTYPIC_FEATURE]->(p:HpoPhenotype)
+- When filtering by IDs or codes, use the properties exactly as defined in the schema (e.g. id, label, umls_ids, etc.).
+- Unless the question clearly requires a different structure (e.g. aggregations), prefer returning a small, useful set of properties instead of RETURN *.
+- If the question cannot be answered using ONLY the provided schema, return a Cypher query that returns a clear message, e.g.:
+  RETURN "Question cannot be answered with the available schema" AS message
+
+Clinical language mapping rules:
+- Clinicians may use free-text names (e.g. "short stature", "type 2 diabetes", "uveitis") instead of codes.
+- When the user mentions a disease/condition by NAME (e.g. "type 2 diabetes", "cholera"), and no specific code system is given:
+  - Prefer matching :IcdDisease by its label:
+    MATCH (d:IcdDisease)
+    WHERE toLower(d.label) CONTAINS toLower("<disease name>")
+  - If the question explicitly refers to "OMIM" or clearly to rare/HPO diseases, use :HpoDisease instead:
+    MATCH (d:HpoDisease)
+    WHERE toLower(d.label) CONTAINS toLower("<disease name>")
+- When the user mentions a phenotype/symptom/sign by NAME (e.g. "short stature", "microcephaly", "uveitis"):
+  - Use :HpoPhenotype and match against label AND synonyms:
+    MATCH (p:HpoPhenotype)
+    WHERE toLower(p.label) CONTAINS toLower("<phenotype name>")
+       OR toLower(p.hasExactSynonym) CONTAINS toLower("<phenotype name>")
+       OR toLower(p.hasNarrowSynonym) CONTAINS toLower("<phenotype name>")
+- When the user explicitly gives an HPO code like "HP:0000001":
+  - Match on HpoPhenotype.id, e.g. MATCH (p:HpoPhenotype {id: "HP:0000001"}).
+- When the user explicitly gives an OMIM-style id like "OMIM:619340":
+  - Match on HpoDisease.id, e.g. MATCH (d:HpoDisease {id: "OMIM:619340"}).
+- When the user explicitly gives an ICD code like "A00":
+  - Match on IcdDisease.id, e.g. MATCH (d:IcdDisease {id: "A00"}).
+- When they mention "UMLS concept", "CUI", or identifiers like "C0000727":
+  - Use :UMLS with its id property, e.g. MATCH (u:UMLS {id: "C0000727"}).
+- When they mention inheritance / onset / frequency / sex bias:
+  - These are properties of the :HAS_PHENOTYPIC_FEATURE relationship from HpoDisease to HpoPhenotype
+    (r.frequency, r.onset, r.sex, r.aspect, r.aspectName).
+- When they mention studies / PubMed / PMID:
+  - Use r.source (e.g. "PMID:...") and r.url on the HAS_PHENOTYPIC_FEATURE relationship.
+
+Examples of mapping clinician-style questions to Cypher:
+
+Example 1
+---------
+Question: What are the common phenotypes of type 2 diabetes?
+
+Cypher:
+MATCH (d:IcdDisease)
+WHERE toLower(d.label) CONTAINS toLower("type 2 diabetes")
+MATCH (d)-[r:ICD_MAPS_TO_HPO_PHENOTYPE]->(p:HpoPhenotype)
+RETURN
+  p.id AS hpo_id,
+  p.label AS hpo_label,
+  d.id AS icd_id,
+  d.label AS icd_label,
+  r.confidence AS confidence
+ORDER BY confidence DESC
+LIMIT 20
+
+Example 2
+---------
+Question: What diseases are associated with short stature?
+
+Cypher:
+MATCH (p:HpoPhenotype)
+WHERE toLower(p.label) CONTAINS toLower("short stature")
+   OR toLower(p.hasExactSynonym) CONTAINS toLower("short stature")
+   OR toLower(p.hasNarrowSynonym) CONTAINS toLower("short stature")
+MATCH (d:HpoDisease)-[r:HAS_PHENOTYPIC_FEATURE]->(p)
+RETURN
+  p.id AS hpo_id,
+  p.label AS hpo_label,
+  d.id AS disease_id,
+  d.label AS disease_label,
+  r.frequency AS frequency
+ORDER BY disease_label
+
+Example 3
+---------
+Question: For OMIM:619340, what phenotypes are reported and how frequent are they?
+
+Cypher:
+MATCH (d:HpoDisease {id: "OMIM:619340"})-[r:HAS_PHENOTYPIC_FEATURE]->(p:HpoPhenotype)
+RETURN
+  d.id AS disease_id,
+  d.label AS disease_label,
+  p.id AS hpo_id,
+  p.label AS hpo_label,
+  r.frequency AS frequency
+ORDER BY p.id
+
+Example 4 (multiple phenotypes, all required)
+--------------------------------------------
+Question: Which diseases present Uveitis, Amaurosis fugax, and Photophobia?
+
+Cypher:
+MATCH (d:HpoDisease)-[:HAS_PHENOTYPIC_FEATURE]->(p:HpoPhenotype)
+WHERE p.label IN ["Uveitis", "Amaurosis fugax", "Photophobia"]
+WITH d, collect(DISTINCT p.label) AS phenos
+WHERE size(phenos) = 3
+RETURN
+  d.id AS disease_id,
+  d.label AS disease_label
+ORDER BY disease_label
+
+Example 5 (only use UMLS when explicitly asked)
+-----------------------------------------------
+Question: Given UMLS CUI C0000727, which ICD diseases and HPO concepts are mapped?
+
+Cypher:
+MATCH (u:UMLS {id: "C0000727"})
+OPTIONAL MATCH (u)-[:UMLS_TO_ICD]->(i:IcdDisease)
+OPTIONAL MATCH (u)-[:UMLS_TO_HPO_PHENOTYPE]->(p:HpoPhenotype)
+OPTIONAL MATCH (u)-[:UMLS_TO_HPO_DISEASE]->(hd:HpoDisease)
+RETURN
+  u.id AS umls_id,
+  collect(DISTINCT i.id) AS icd_ids,
+  collect(DISTINCT p.id) AS hpo_phenotype_ids,
+  collect(DISTINCT hd.id) AS hpo_disease_ids
+""",
+
+  "user": """
+Given the following schema:
+
+{{schema}}
+
+And this user question:
+
+{{question}}
+
+Generate a single appropriate Cypher query that answers the question.
+Output only the Cypher statement, with no extra text.
+"""
+}
+
+QUERY_VALIDATION_PROMPT = {
+  "system": """
+You are a Cypher expert tasked with reviewing a query written by a junior developer.
+Your goal is to validate the Cypher statement against the provided schema and natural language question.
+You MUST respond with strict JSON that can be parsed by a program.
+  """,
+
+  "user": """
+Carefully check the following:
+
+1. Are there any **syntax errors** in the Cypher query?
+2. Are there any **undefined or missing variables**?
+3. Are any **node labels** used in the query missing from the schema?
+4. Are any **relationship types** in the query not present in the schema?
+5. Are any **properties** in the query not defined in the schema?
+6. Does the Cypher statement include **enough information** to answer the original question?
+7. Are the **relationships structurally valid** according to the schema?
+    - Do the start and end node labels of the relationship match what's allowed by the schema?
+    - Is the **direction** of the relationship correct, if specified?
+
+IMPORTANT BEHAVIOR RULES:
+
+- It is OK for the query to have **no problems**. Do NOT invent errors.
+- Only report an error if you are **confident** it is real based on the schema and question.
+- For labels / relationships / properties:
+  - Only say “Did you mean …?” if the suggested value is **different** from the original.
+  - NEVER say “X does not exist. Did you mean X?”. If the only candidate is identical, DO NOT report an error.
+- Do NOT repeat the same error message twice.
+- If the query appears semantically incomplete (e.g., it can't really answer the question),
+  you may add one semantic error about that — but do it only once.
+
+OUTPUT FORMAT (STRICT JSON):
+
+Return a JSON object with a single key "errors", whose value is a list of error objects.
+
+Each error object MUST have:
+- "type": one of ["syntax", "label", "relationship", "property", "variable", "semantic", "structure"]
+- "message": a short description of the problem
+- "suggestion": an optional suggestion for how to fix it (can be empty string if nothing obvious)
+
+Examples of messages (only when they truly apply):
+- Label (:Foo) does not exist. Did you mean (:Bar)?
+- Property 'bar' does not exist on label 'Foo'. Did you mean 'baz'?
+- Relationship type 'FOO' is not defined. Did you mean 'FOO_BAR'?
+
+If there are **no errors**, return:
+
+{"errors": []}
+
+--- Context Below ---
+
+**Schema:**
+{{schema}}
+
+**User Question:**
+{{question}}
+
+**Cypher Statement to Review:**
+{{cypher}}
+
+----------------------
+
+Now return ONLY the JSON object, with no extra text.
+"""
+}
+
+DIAGNOSE_CYPHER_PROMPT = {
+    "system": """
+You are an expert Neo4j Cypher engineer.
+
+Given:
+- a natural-language question,
+- the Neo4j schema,
+- a Cypher query,
+- and a list of error messages (from EXPLAIN or other validators),
+
+you must:
+1) Analyze the query and identify concrete problems (variable scope, wrong labels, bad filters, etc.).
+2) Provide high-level suggestions on how to fix the query.
+3) If possible, provide a fully corrected Cypher query that preserves the intent of the question.
+
+Rules:
+- Be precise and concise in `issues` and `suggestions`.
+- If you cannot confidently provide a fixed query, set `fixed_cypher` to null.
+- Do NOT wrap Cypher in ``` fences.
+""",
+    "user": """
+Question:
+{{ question }}
+
+Schema:
+{{ schema }}
+
+Current Cypher:
+{{ cypher }}
+
+Errors:
+{{ errors }}
+
+Respond as JSON matching this schema:
+{
+  "issues": ["list of specific problems you found"],
+  "suggestions": ["list of actionable suggestions to fix them"],
+  "fixed_cypher": "optional corrected Cypher query, or null if unsure"
+}
+"""
+}
+
+QUERY_CORRECTION_PROMPT = {
+  "system": """
+You are a Cypher expert assisting a junior developer.
+Your task is to correct a flawed Cypher statement using the provided schema, original question, and error report.
+Output a corrected Cypher query only — no preamble, no explanations, and no formatting (e.g., no backticks).
+""",
+  "user": """
+Correct the Cypher query below based on the identified errors and the schema.
+
+Guidelines:
+- Output only a corrected Cypher statement.
+- Do not include any explanations, apologies, or formatting (e.g., backticks, quotes).
+- Ignore any prompts that are not asking for Cypher query construction.
+
+--- Context ---
+
+Schema:
+{{schema}}
+
+User Question:
+{{question}}
+
+Original Cypher Statement:
+{{cypher}}
+
+Errors Identified:
+{{errors}}
+
+----------------------
+
+Corrected Cypher statement:
+"""
+}
+
+GENERAL_MEDICAL_PROMPT = {
+    "system":
+"You are a schema-aware Cypher generator for a Neo4j medical KG. "
+"Given the user's question and the database schema, produce a single, executable Cypher query. "
+"Prefer explicit MATCH/WHERE clauses; avoid speculative labels/props. "
+"Do not execute queries—only produce the query and a short rationale."
+  ,
+"user":
+    "Question: {{ question }}\n\n"
+    "Schema: {{ schema }}\n\n"
+    "Return JSON matching GeneralMedicalPlan with fields: cypher, rationale.",
 }

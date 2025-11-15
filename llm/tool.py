@@ -88,7 +88,7 @@ def build_patient_ned_tool(llm):
     return patient_ned_tool
 
 
-def build_general_medical_tool(llm: ChatOpenAI):
+def build_general_medical_tool(llm: ChatOpenAI, debug: bool = False):
     
     @tool("general_medical_executor", args_schema=GeneralMedicalInput)
     def general_medical_executor(
@@ -96,7 +96,7 @@ def build_general_medical_tool(llm: ChatOpenAI):
         top_k: int = 20
     ):
         """General medical: schema-aware Text→Cypher with validation/correction."""
-        cypher, rows = text2cypher_pipeline(llm, question, debug=True)
+        cypher, rows = text2cypher_pipeline(llm, question, debug=debug)
         
         if isinstance(rows, list) and top_k is not None:
             rows = rows[: int(top_k)]

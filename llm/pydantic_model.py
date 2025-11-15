@@ -76,11 +76,13 @@ class PatientNEDResponse(PatientNEREntity):
 ### RAG Models ###
 ##################
 
+"""
 class Property(BaseModel):
     node_label: str
     property_key: str
     property_value: str
-
+"""
+    
 class ValidationError(BaseModel):
     type: Literal["syntax", "label", "relationship", "property", "variable", "semantic", "structure"]
     message: str
@@ -102,3 +104,4 @@ class GeneralMedicalResponse(BaseModel):
     cypher: str
     rows: List[Dict[str, Any]]
     steps: List[str] = []
+    explanation: str

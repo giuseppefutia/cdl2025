@@ -1,3 +1,4 @@
+import json
 from typing import List
 
 from langchain_core.tools import tool
@@ -19,6 +20,7 @@ from llm.chain import (
     ontology_mapping_chain,
     patient_ner_chain,
     patient_ned_chain,
+    clinician_explanation_chain
 )
 
 from llm.pipeline import text2cypher_pipeline, enhanced_graph
@@ -89,18 +91,43 @@ def build_patient_ned_tool(llm):
 
 
 def build_general_medical_tool(llm: ChatOpenAI, debug: bool = False):
-    
+    explanation_chain = clinician_explanation_chain(llm)
+
     @tool("general_medical_executor", args_schema=GeneralMedicalInput)
     def general_medical_executor(
         question: str,
-        top_k: int = 20
+        top_k: int = 20,
     ):
-        """General medical: schema-aware Text→Cypher with validation/correction."""
+        """
+        Run a general medical query against the Neo4j knowledge graph, converting
+        the question to Cypher, truncating results to top_k, and returning rows
+        along with an LLM-generated explanation.
+        """
         cypher, rows = text2cypher_pipeline(llm, question, debug=debug)
-        
+
         if isinstance(rows, list) and top_k is not None:
             rows = rows[: int(top_k)]
 
-        return GeneralMedicalResponse(cypher=cypher, rows=rows, steps=["text2cypher", "validated", "executed"]).model_dump()
+        # Prepare JSON for the prompt
+        rows_json = json.dumps(rows, default=str)
+
+        try:
+            explanation = explanation_chain.invoke(
+                {
+                    "schema": NEO4J_SCHEMA.strip(),
+                    "question": question,
+                    "cypher": cypher,
+                    "rows_json": rows_json,
+                }
+            )
+        except Exception as e:
+            explanation = f"Explanation could not be generated: {e}"
+
+        return GeneralMedicalResponse(
+            cypher=cypher,
+            rows=rows,
+            steps=["text2cypher", "validated", "executed", "explained"],
+            explanation=explanation,
+        ).model_dump()
 
     return general_medical_executor

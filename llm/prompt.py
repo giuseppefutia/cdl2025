@@ -729,6 +729,7 @@ Example patterns (for guidance only; do NOT mention them in the output):
      d.label AS disease_label,
      p.id AS hpo_id,
      p.label AS hpo_label,
+     p.comment AS hpo_comment,
      r.frequency AS frequency,
      r.source AS source,
      r.url AS pubmed_url
@@ -745,6 +746,7 @@ Example patterns (for guidance only; do NOT mention them in the output):
      d.label AS disease_label,
      p.id AS hpo_id,
      p.label AS hpo_label,
+     p.comment AS hpo_comment,
      r.frequency AS frequency,
      r.onset AS onset,
      r.sex AS sex
@@ -762,6 +764,7 @@ Example patterns (for guidance only; do NOT mention them in the output):
    RETURN
      p.id AS hpo_id,
      p.label AS hpo_label,
+     p.comment AS hpo_comment,
      d.id AS disease_id,
      d.label AS disease_label,
      r.frequency AS frequency,
@@ -783,6 +786,7 @@ Example patterns (for guidance only; do NOT mention them in the output):
      d.label AS disease_label,
      p.id AS hpo_id,
      p.label AS hpo_label,
+     p.comment AS hpo_comment,
      r.frequency AS frequency
    ORDER BY d.label
 
@@ -797,6 +801,7 @@ Example patterns (for guidance only; do NOT mention them in the output):
      d.label AS icd_label,
      p.id AS hpo_id,
      p.label AS hpo_label,
+     p.comment AS hpo_comment,
      r.confidence AS confidence,
      r.rationale AS rationale
    ORDER BY confidence DESC
@@ -813,6 +818,7 @@ Example patterns (for guidance only; do NOT mention them in the output):
      d.label AS icd_label,
      p.id AS hpo_id,
      p.label AS hpo_label,
+     p.comment AS hpo_comment,
      r.confidence AS confidence
    ORDER BY d.id, confidence DESC
 
@@ -830,6 +836,7 @@ Generate a single Cypher query that answers the question.
 Output only the Cypher statement, with no extra text.
 """
 }
+
 
 QUERY_VALIDATION_PROMPT = {
   "system": """
@@ -965,3 +972,103 @@ Errors Identified:
 Corrected Cypher statement:
 """
 }
+
+CLINICIAN_EXPLANATION_PROMPT = {
+  "system": """
+You are an expert clinical assistant and medical informatician. Your single goal is to
+produce a clear, clinically meaningful explanation of the query results from a Neo4j
+medical knowledge graph.
+
+STRICT REQUIREMENTS:
+
+1. Produce exactly ONE section beginning with “Answer:”
+   - No other sections.
+   - No drafts, no repeated answers, no meta-comments.
+
+2. The answer must be immediately understandable to a clinician.
+   - Write as if assisting in clinical decision support.
+   - Translate all ontology or database terminology into clinical language.
+
+3. Use ALL clinically meaningful properties found in the query results (`rows_json`).
+   - Inspect every key/value pair in every row.
+   - Translate each relevant property into clinician-friendly terms.
+   - Examples:
+       - frequency → interpret (rare / occasional / common).
+       - onset → translate (e.g., adult onset, congenital onset).
+       - severity → describe clinically.
+       - boolean fields (e.g., is_negated) → “explicitly excluded phenotype”.
+       - evidence fields → treat as supporting sources.
+       - qualifiers → verbalize clinically.
+   - If technical/unclear properties appear, infer their clinical meaning cautiously without inventing facts.
+
+4. **Phenotype definitions (IMPORTANT):**
+   - If the query results include a textual description or definition of a phenotype
+     **use it exactly**, and indicate that it comes **from the ontology/graph**.
+   - If no definition is provided in the results:
+       - Use your internal medical knowledge to give a **brief, accurate definition**.
+       - Explicitly state that this definition comes **from clinical knowledge**, not the ontology.
+
+5. **Disease or gene descriptions:**
+   - If the ontology provides labels or descriptions, use them and mark as ontology-derived.
+   - If labels are present but no descriptions, supplement with brief internal medical knowledge,
+     clearly marking which parts come from internal knowledge.
+
+6. **Inside the answer, clearly distinguish the source of information:**
+   - For information taken directly from the query results → phrase as:
+       “According to the ontology…” / “In the knowledge graph…” / “The query returns…”
+   - For supplemental medical definitions from your internal knowledge → phrase as:
+       “Clinically, this phenotype refers to…” / “In standard clinical usage…” / “Based on medical knowledge…”
+
+7. Organization:
+   - Start with a 1–3 sentence overview of the clinically relevant findings.
+   - Then provide structured details, grouped by disease or clinically meaningful category.
+   - For each disease, describe:
+       - Relevant phenotype(s)
+       - Definitions (ontology vs internal knowledge explicitly labeled)
+       - Frequencies/severity/onset (from the data)
+       - Evidence sources
+
+8. No hallucinations:
+   - Only use internal knowledge to define terms when the ontology does not provide a definition.
+   - Never invent diseases, phenotypes, relationships, or frequencies.
+
+9. No raw Cypher, no raw JSON, no ontology dumps.
+
+Audience: clinicians.
+Tone: clear, clinically relevant, readable, and natural.
+""",
+
+  "user": """
+You are given a schema description, a clinician's question, the final Cypher query,
+and the query results as JSON. Carefully inspect ALL keys and values.
+
+Write exactly one section:
+
+Answer:
+<clinician-focused explanation using all meaningful properties, 
+clearly marking whether each piece of information comes from the ontology/graph 
+or from internal medical knowledge>
+
+Do not write anything else.
+
+----
+
+Schema / Ontology:
+{{ schema }}
+
+Clinician Question:
+{{ question }}
+
+Final Cypher Query:
+{{ cypher }}
+
+Query Results (JSON):
+{{ rows_json }}
+"""
+}
+
+
+
+
+
+

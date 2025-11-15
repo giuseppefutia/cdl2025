@@ -3,13 +3,14 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_core.output_parsers import StrOutputParser
 
 from llm.prompt import (
-    DIAGNOSE_CYPHER_PROMPT,
     ONTOLOGY_MAPPING_PROMPT,
     PATIENT_NER_PROMPT,
     PATIENT_NED_PROMPT,
     TEXT_2_CYPHER_PROMPT,
     QUERY_VALIDATION_PROMPT,
+    DIAGNOSE_CYPHER_PROMPT,
     QUERY_CORRECTION_PROMPT,
+    CLINICIAN_EXPLANATION_PROMPT,
 )
 
 from llm.pydantic_model import (
@@ -127,5 +128,19 @@ def correct_cypher_chain(llm_model: ChatOpenAI):
             template_format="jinja2"
         )
     ])
+    return prompt | llm_model | StrOutputParser()
+
+def clinician_explanation_chain(llm_model: ChatOpenAI):
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(
+            CLINICIAN_EXPLANATION_PROMPT["system"],
+            template_format="jinja2",
+        ),
+        HumanMessagePromptTemplate.from_template(
+            CLINICIAN_EXPLANATION_PROMPT["user"],
+            template_format="jinja2",
+        ),
+    ])
+    # structured output, like you do for DiagnoseCypherOutput
     return prompt | llm_model | StrOutputParser()
 

@@ -23,6 +23,7 @@ from llm.pydantic_model import (
     GuardrailsDecision,
     ValidateCypherOutput,
     DiagnoseCypherOutput,
+    PatientCoverageResponse
 )
 
 #######################
@@ -170,7 +171,7 @@ def patient_coverage_chain(llm_model: ChatOpenAI):
             template_format="jinja2"
             ),
         ])
-    return prompt | llm_model.with_structured_output()
+    return prompt | llm_model.with_structured_output(PatientCoverageResponse)
 
 
 def get_final_answer_chain(llm_model: ChatOpenAI):

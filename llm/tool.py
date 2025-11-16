@@ -28,19 +28,7 @@ from llm.chain import (
 )
 
 from llm.pipeline import text2cypher_pipeline, enhanced_graph
-from llm.query_factory import QueryFragmentFactory
-
-### SHOULD BE MOVED SOME WHERE ELSE LATER ###
-
-fragment_factory = QueryFragmentFactory(enhanced_graph)
-
-def build_auto_query() -> str:
-    """Return the full step-by-step Cypher assembled automatically from fragments."""
-    return fragment_factory.stitched_query()
-
-def run_auto_query(patient_id: str, limit: int = 20):
-    cypher = build_auto_query()
-    return enhanced_graph.query(cypher, {"pid": patient_id, "limit": int(limit)})
+from llm.query_factory import rank_diseases_for_patient
 
 
 ########################
@@ -158,18 +146,43 @@ def build_patient_coverage_tool(llm: ChatOpenAI):
     @tool("patient_coverage")
     def patient_coverage(
         patient_id: str,
-        limit: int = 20):
-        """Deterministic single-patient coverage using fragment composer."""
-        _ = chain.invoke({"patient_id": patient_id, "limit": int(limit)}) # for auditability
-        cypher = build_auto_query()
-        rows = enhanced_graph.query(cypher, {"pid": patient_id, "limit": int(limit)})
+        limit: int = 20,
+    ):
+        """
+        Deterministic single-patient coverage using the canonical Python pipeline:
+        get_patient_icd_codes -> map_icd_to_hpo -> rollup_hpo_to_ancestors -> compute_coverage
+        """
+        # Still run the LLM chain for traceability / audit logs
+        _ = chain.invoke({"patient_id": patient_id, "limit": int(limit)})
+
+        # Use the new implementation instead of stitched Cypher
+        rows = rank_diseases_for_patient(patient_id=patient_id, limit=int(limit))
+
         # Cast rows into CoverageRow when possible
         cast_rows: List[CoverageRow] = []
         for r in rows or []:
             try:
                 cast_rows.append(CoverageRow(**r))
             except Exception:
+                # If casting fails, just skip and fall back to raw dicts
                 pass
-            return PatientCoverageResponse(cypher=cypher, rows=cast_rows or rows, steps=["fragments", "stitched", "executed"]).model_dump()
+
+        response_rows = cast_rows or rows
+
+        return PatientCoverageResponse(
+            cypher=(
+                "MULTI-STEP PIPELINE: "
+                "get_patient_icd_codes -> map_icd_to_hpo -> "
+                "rollup_hpo_to_ancestors -> compute_coverage"
+            ),
+            rows=response_rows,
+            steps=[
+                "patient_icd",
+                "icd_to_hpo",
+                "rollup_ancestors",
+                "coverage",
+            ],
+        ).model_dump()
 
     return patient_coverage
+

@@ -36,19 +36,6 @@ class AgentState(TypedDict, total=False):
 ### Node implementations ###
 ############################
 
-llm = ChatOpenAI(
-    api_key="EMPTY",
-    base_url="https://chatcompletion-uncognizable-nilda.ngrok-free.dev/v1",
-    model_name="google/medgemma-4b-it",
-    temperature=0,
-    max_tokens=24000,
-    top_p=0.9,
-    stop=["<end_of_turn>", "</s>", "\nUser:", "\n\nUser:"],
-    frequency_penalty=0.2,
-    presence_penalty=0.0,
-)
-
-
 def node_guardrails(state: AgentState) -> AgentState:
     guard = get_guardrails_chain(llm).invoke({"question": state.get("question")})
     if getattr(guard, "decision", None) == "end":
@@ -84,6 +71,7 @@ def node_get_icd(state: AgentState) -> AgentState:
             if state.get("patient_id")
             else []
         )
+        print(f"DEBUG: Retrieved ICD codes: {codes}")
         return {
             **state,
             "icd_codes": codes,
@@ -285,15 +273,18 @@ def run_agent(question: str, *, patient_id: Optional[str] = None) -> Dict[str, A
 
 
 ############################
-# CLI entry (optional)     #
+### CLI entry (optional) ###
 ############################
 
 if __name__ == "__main__":
     # Minimal smoke test; relies on your DB contents.
     import json
 
-    q = "Show possible diseases by HPO coverage for patientId:'P001'"
-    q = "For cystic fibrosis, what symptoms are documented and what is the evidence supporting them?"
+    q = "Show possible diseases by HPO coverage for patientId:'P003'. Report the covered and the total and a subset of missing HPO names for each disease."
+    # q = "For cystic fibrosis, what symptoms are documented and what is the evidence supporting them?"
     
     out = run_agent(q)
     print(json.dumps(out, indent=2, ensure_ascii=False))
+
+    with open("output.json", "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)

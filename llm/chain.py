@@ -3,23 +3,26 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_core.output_parsers import StrOutputParser
 
 from llm.prompt import (
+    FINAL_ANSWER_PROMPT,
     ONTOLOGY_MAPPING_PROMPT,
     PATIENT_NER_PROMPT,
     PATIENT_NED_PROMPT,
+    GUARDRAILS_PROMPT,
     TEXT_2_CYPHER_PROMPT,
     QUERY_VALIDATION_PROMPT,
     DIAGNOSE_CYPHER_PROMPT,
     QUERY_CORRECTION_PROMPT,
     CLINICIAN_EXPLANATION_PROMPT,
+    PATIENT_COVERAGE_PROMPT,
 )
 
 from llm.pydantic_model import (
-    DiagnoseCypherOutput,
     OntologyMappingResponse,
     PatientNERResponse,
     PatientNEDResponse,
+    GuardrailsDecision,
     ValidateCypherOutput,
-    GeneralMedicalInput,
+    DiagnoseCypherOutput,
 )
 
 #######################
@@ -74,6 +77,18 @@ def patient_ned_chain(llm_model: ChatOpenAI):
 ########################
 
 
+def get_guardrails_chain(llm_model: ChatOpenAI):
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(
+            GUARDRAILS_PROMPT["system"], template_format="jinja2"
+        ),
+        HumanMessagePromptTemplate.from_template(
+            GUARDRAILS_PROMPT["user"], template_format="jinja2"
+        ),
+    ])
+    return prompt | llm_model.with_structured_output(GuardrailsDecision)
+
+
 def text2cypher_chain(llm_model: ChatOpenAI):
     prompt = ChatPromptTemplate.from_messages([
         SystemMessagePromptTemplate.from_template(
@@ -113,7 +128,6 @@ def diagnose_cypher_chain(llm_model: ChatOpenAI):
             template_format="jinja2",
         ),
     ])
-    # 👇 this is where the Pydantic model is actually used
     return prompt | llm_model.with_structured_output(DiagnoseCypherOutput)
 
 
@@ -130,6 +144,7 @@ def correct_cypher_chain(llm_model: ChatOpenAI):
     ])
     return prompt | llm_model | StrOutputParser()
 
+
 def clinician_explanation_chain(llm_model: ChatOpenAI):
     prompt = ChatPromptTemplate.from_messages([
         SystemMessagePromptTemplate.from_template(
@@ -141,6 +156,30 @@ def clinician_explanation_chain(llm_model: ChatOpenAI):
             template_format="jinja2",
         ),
     ])
-    # structured output, like you do for DiagnoseCypherOutput
     return prompt | llm_model | StrOutputParser()
 
+
+def patient_coverage_chain(llm_model: ChatOpenAI):
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(
+            PATIENT_COVERAGE_PROMPT["system"],
+            template_format="jinja2"
+        ),
+        HumanMessagePromptTemplate.from_template(
+            PATIENT_COVERAGE_PROMPT["user"],
+            template_format="jinja2"
+            ),
+        ])
+    return prompt | llm_model.with_structured_output()
+
+
+def get_final_answer_chain(llm_model: ChatOpenAI):
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(
+            FINAL_ANSWER_PROMPT["system"], template_format="jinja2"
+        ),
+        HumanMessagePromptTemplate.from_template(
+            FINAL_ANSWER_PROMPT["user"], template_format="jinja2"
+        ),
+    ])
+    return prompt | llm_model | StrOutputParser()

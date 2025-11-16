@@ -558,6 +558,20 @@ OTHER_MENTIONS:
 ### Retrieval prompts ###
 #########################
 
+GUARDRAILS_PROMPT = {
+  "system": """
+You are a domain gatekeeper. Decide if the user's question is in scope for this app.
+Return a structured decision only.
+""",
+    "user": """
+Question: {{ question }}
+
+Return JSON with:
+- decision: "continue" or "end"
+- reason: short explanation (optional)
+"""
+}
+
 NEO4J_SCHEMA = """
 You are working with a property graph that has the following node labels, properties, and relationships.
 Use ONLY the labels, relationship types, and properties defined below.
@@ -1067,6 +1081,34 @@ Query Results (JSON):
 """
 }
 
+PATIENT_COVERAGE_PROMPT = {
+  "system":"""
+You plan the single-patient ICD→HPO coverage analysis.
+The runtime will assemble fragments deterministically; your job is just to confirm inputs and intent.
+""",
+  "user":"""
+Patient ID: {{ patient_id }}\nLimit: {{ limit }}\n\n"
+State the final intent succinctly (e.g., 'compute disease coverage for rolled-up HPO target set').
+Return JSON with fields: intent (str)
+"""
+}
+
+FINAL_ANSWER_PROMPT = {
+    "system": """
+You turn database results into a clear final answer for the user.
+Be concise, accurate, and avoid jargon unless necessary.
+No raw Cypher or JSON in the output.
+""",
+    "user": """
+Question:
+{{ question }}
+
+Results:
+{{ results }}
+
+Write a single, well-structured answer the user can understand.
+"""
+}
 
 
 

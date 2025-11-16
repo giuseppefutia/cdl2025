@@ -72,9 +72,9 @@ class PatientNEDResponse(PatientNEREntity):
     confidence: float = Field(default=None, ge=0.0, le=1.0)
     linking_rationale: str
 
-##################
-### RAG Models ###
-##################
+####################
+### Query Models ###
+####################
 
 """
 class Property(BaseModel):
@@ -82,6 +82,10 @@ class Property(BaseModel):
     property_key: str
     property_value: str
 """
+
+class GuardrailsDecision(BaseModel):
+    decision: Literal["continue", "end"]
+    reason: Optional[str] = None
     
 class ValidationError(BaseModel):
     type: Literal["syntax", "label", "relationship", "property", "variable", "semantic", "structure"]
@@ -105,3 +109,29 @@ class GeneralMedicalResponse(BaseModel):
     rows: List[Dict[str, Any]]
     steps: List[str] = []
     explanation: str
+
+######################
+### Patient Models ###
+######################
+
+class PatientCoverageInput(BaseModel):
+    patient_id: str
+    limit: int = 20
+
+class CoverageRow(BaseModel):
+    diseaseId: str
+    diseaseName: str
+    covered: int
+    total: int
+    coveragePct: float
+    missingHpoIds: List[str]
+
+class CoverageResponse(BaseModel):
+    cypher: str
+    rows: List[CoverageRow]
+    steps: List[str] = []
+
+class PatientCoverageResponse(BaseModel):
+    cypher: str
+    rows: List[CoverageRow]
+    steps: List[str] = []

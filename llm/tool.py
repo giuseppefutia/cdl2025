@@ -15,16 +15,35 @@ from llm.pydantic_model import (
     PatientNEDOtherMention,
     GeneralMedicalInput,
     GeneralMedicalResponse,
+    PatientCoverageInput,
+    CoverageRow,
+    PatientCoverageResponse,
 )
 from llm.chain import (
     ontology_mapping_chain,
     patient_ner_chain,
     patient_ned_chain,
-    clinician_explanation_chain
+    clinician_explanation_chain,
+    patient_coverage_chain,
 )
 
 from llm.pipeline import text2cypher_pipeline, enhanced_graph
+from llm.query_factory import QueryFragmentFactory
 
+### SHOULD BE MOVED SOME WHERE ELSE LATER ###
+
+fragment_factory = QueryFragmentFactory(enhanced_graph)
+
+def build_auto_query() -> str:
+    """Return the full step-by-step Cypher assembled automatically from fragments."""
+    return fragment_factory.stitched_query()
+
+def run_auto_query(patient_id: str, limit: int = 20):
+    cypher = build_auto_query()
+    return enhanced_graph.query(cypher, {"pid": patient_id, "limit": int(limit)})
+
+
+########################
 
 def build_ontology_mapper_tool(llm):
     chain = ontology_mapping_chain(llm)
@@ -131,3 +150,26 @@ def build_general_medical_tool(llm: ChatOpenAI, debug: bool = False):
         ).model_dump()
 
     return general_medical_executor
+
+
+def build_patient_coverage_tool(llm: ChatOpenAI):
+    chain = patient_coverage_chain(llm)
+
+    @tool("patient_coverage")
+    def patient_coverage(
+        patient_id: str,
+        limit: int = 20):
+        """Deterministic single-patient coverage using fragment composer."""
+        _ = chain.invoke({"patient_id": patient_id, "limit": int(limit)}) # for auditability
+        cypher = build_auto_query()
+        rows = enhanced_graph.query(cypher, {"pid": patient_id, "limit": int(limit)})
+        # Cast rows into CoverageRow when possible
+        cast_rows: List[CoverageRow] = []
+        for r in rows or []:
+            try:
+                cast_rows.append(CoverageRow(**r))
+            except Exception:
+                pass
+            return PatientCoverageResponse(cypher=cypher, rows=cast_rows or rows, steps=["fragments", "stitched", "executed"]).model_dump()
+
+    return patient_coverage

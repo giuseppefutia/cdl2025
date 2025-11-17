@@ -142,27 +142,44 @@ def build_general_medical_tool(llm: ChatOpenAI, debug: bool = False):
     return general_medical_executor
 
 
+import json
+import re
+from typing import Optional
+from langchain_core.tools import tool
+
 def build_patient_info_tool(llm: ChatOpenAI):
-    """
-    Build a LangChain tool that:
-      - Fetches the virtualized patient data from Neo4j (via get_patient_views)
-      - Serializes it as JSON (list of encounter views)
-      - Passes it and the clinician's question to get_patient_answer_chain
-      - Returns a structured answer
-    """
     explain_chain = get_patient_answer_chain(llm)
 
     @tool("patient_info", args_schema=PatientInfoInput)
     def patient_info_tool(
         patient_id: str,
         question: str,
-        encounter_date: Optional[date] = None,
+        encounter_date: Optional[str] = None,
     ):
         """
         Explain a patient's virtualized Neo4j 'Patient' node in clinician-friendly
-        language. If encounter_date is provided, restrict to that date; otherwise
-        include all encounters for the patient.
+        language.
+
+        encounter_date:
+          - None       -> include all encounters, UNLESS a date or 'latest'
+                          can be inferred from the question.
+          - "latest"   -> use only the most recent encounter.
+          - "YYYY-MM-DD" -> use only encounters from that date.
         """
+        # ---- 🔍 Auto-detect encounter_date from the question if not provided ----
+        if encounter_date is None:
+            q_lower = question.lower()
+
+            # Detect "latest" / "most recent" etc.
+            if "latest" in q_lower or "most recent" in q_lower:
+                encounter_date = "latest"
+            else:
+                # Simple ISO date pattern, e.g. 2024-01-22
+                m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", question)
+                if m:
+                    encounter_date = m.group(1)
+
+        # Now pass the possibly-inferred encounter_date into the graph layer
         patient_views = get_patient_views(
             patient_id=patient_id,
             encounter_date=encounter_date,
@@ -185,9 +202,7 @@ def build_patient_info_tool(llm: ChatOpenAI):
         return {
             "patient_id": patient_id,
             "question": question,
-            "encounter_date": (
-                encounter_date.isoformat() if encounter_date else None
-            ),
+            "encounter_date": encounter_date,
             "has_data": has_data,
             "answer": answer,
             "raw_patient_view": patient_views,

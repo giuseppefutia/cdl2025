@@ -1,5 +1,6 @@
 import ast
 from datetime import datetime, date
+from datetime import date as DateType
 from typing import Any, Dict, Optional, List
 
 from langchain_neo4j import Neo4jGraph
@@ -31,7 +32,7 @@ def _parse_encounter_start(value: Optional[str]) -> Optional[date]:
         return datetime.fromisoformat(value).date()
     except Exception:
         try:
-            # Fallback: take the first 10 chars as YYYY-MM-DD
+            # Fallback: first 10 chars as 'YYYY-MM-DD'
             return datetime.strptime(value[:10], "%Y-%m-%d").date()
         except Exception:
             return None
@@ -39,17 +40,17 @@ def _parse_encounter_start(value: Optional[str]) -> Optional[date]:
 
 def get_patient_views(
     patient_id: str,
-    encounter_date: Optional[date] = None,
+    encounter_date: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Fetch virtualized 'patient' resources via APOC DV and return a list of
     normalized views.
-    Args:
-        patient_id: The PatientId to query.
-        encounter_date: If provided, filter to only include encounters
-            with this exact Encounter.period.start date.
-    Returns:
-        A list of patient views as dictionaries.
+
+    encounter_date semantics:
+      - None       -> return ALL encounters (no date-based filtering).
+      - "latest"   -> return ONLY the most recent encounter by Encounter.period.start.
+      - "YYYY-MM-DD" -> return ONLY encounters whose Encounter.period.start
+                        matches that calendar day.
     """
     cypher = """
     CALL apoc.dv.query('patient', {patientId: $patient_id}) YIELD node AS v
@@ -59,36 +60,39 @@ def get_patient_views(
     if not rows:
         return []
 
+    # Interpret encounter_date
+    selection_mode: str = "all"  # "all" | "date" | "latest"
+    requested_date: Optional[DateType] = None
+
+    if encounter_date:
+        enc_str = encounter_date.strip().lower()
+        if enc_str == "latest":
+            selection_mode = "latest"
+        else:
+            try:
+                requested_date = DateType.fromisoformat(encounter_date.strip())
+                selection_mode = "date"
+            except ValueError:
+                # If parsing fails, treat as "all" (safe fallback)
+                selection_mode = "all"
+                requested_date = None
+
     views: List[Dict[str, Any]] = []
 
-    for row in rows:
-        v = row.get("v")
-
-        if isinstance(v, dict) and "properties" in v:
-            props = v.get("properties", {})
-            identity = v.get("identity")
-            labels = v.get("labels", [])
-            element_id = v.get("elementId") or v.get("element_id")
-        else:
-            props = v if isinstance(v, dict) else {}
-            identity = None
-            labels = []
-            element_id = None
-
-        # --- date filtering logic ---
-        encounter_start_str = props.get("Encounter.period.start")
-        encounter_start_date = _parse_encounter_start(encounter_start_str)
-
-        if encounter_date is not None:
-            # Strict: only keep rows we can parse AND that match the requested date
-            if encounter_start_date is None or encounter_start_date != encounter_date:
-                continue  # skip this row
-
+    # Helper to build a normalized view from a virtual node
+    def _build_view(
+        props: Dict[str, Any],
+        identity: Any,
+        labels: List[str],
+        element_id: Optional[str],
+        encounter_start_str: Optional[str],
+        encounter_start_date: Optional[DateType],
+    ) -> Dict[str, Any]:
         icd_codes = _parse_python_list_string(props.get("ICD10_Codes"))
         ner_entities = _parse_python_list_string(props.get("NER_Entities"))
         ned_entities = _parse_python_list_string(props.get("NED_Entities"))
 
-        view: Dict[str, Any] = {
+        return {
             "patient_id": props.get("PatientId") or props.get("patientId"),
             "identity": identity,
             "labels": labels,
@@ -129,9 +133,8 @@ def get_patient_views(
 
             # Traceability
             "filters": {
-                "encounter_date_requested": (
-                    encounter_date.isoformat() if encounter_date else None
-                ),
+                "selection_mode": selection_mode,
+                "encounter_date_requested": encounter_date,
                 "encounter_start_date_parsed": (
                     encounter_start_date.isoformat()
                     if encounter_start_date
@@ -140,7 +143,85 @@ def get_patient_views(
             },
         }
 
-        views.append(view)
+    # --- Mode: "latest" -> choose the single latest encounter ---
+    if selection_mode == "latest":
+        chosen = None
+        chosen_parsed_date: Optional[DateType] = None
+        chosen_meta = None  # (props, identity, labels, element_id, start_str)
+
+        for row in rows:
+            v = row.get("v")
+
+            if isinstance(v, dict) and "properties" in v:
+                props = v.get("properties", {})
+                identity = v.get("identity")
+                labels = v.get("labels", [])
+                element_id = v.get("elementId") or v.get("element_id")
+            else:
+                props = v if isinstance(v, dict) else {}
+                identity = None
+                labels = []
+                element_id = None
+
+            encounter_start_str = props.get("Encounter.period.start")
+            encounter_start_date = _parse_encounter_start(encounter_start_str)
+
+            if chosen is None:
+                chosen = row
+                chosen_parsed_date = encounter_start_date
+                chosen_meta = (props, identity, labels, element_id, encounter_start_str)
+                continue
+
+            if encounter_start_date and (
+                chosen_parsed_date is None or encounter_start_date > chosen_parsed_date
+            ):
+                chosen = row
+                chosen_parsed_date = encounter_start_date
+                chosen_meta = (props, identity, labels, element_id, encounter_start_str)
+
+        if chosen_meta is None:
+            return []
+
+        props, identity, labels, element_id, encounter_start_str = chosen_meta
+        encounter_start_date = chosen_parsed_date
+
+        views.append(
+            _build_view(
+                props, identity, labels, element_id,
+                encounter_start_str, encounter_start_date
+            )
+        )
+        return views
+
+    # --- Mode: "date" -> keep only encounters that match requested_date ---
+    for row in rows:
+        v = row.get("v")
+
+        if isinstance(v, dict) and "properties" in v:
+            props = v.get("properties", {})
+            identity = v.get("identity")
+            labels = v.get("labels", [])
+            element_id = v.get("elementId") or v.get("element_id")
+        else:
+            props = v if isinstance(v, dict) else {}
+            identity = None
+            labels = []
+            element_id = None
+
+        encounter_start_str = props.get("Encounter.period.start")
+        encounter_start_date = _parse_encounter_start(encounter_start_str)
+
+        if selection_mode == "date":
+            # Strict: require parsed date and exact match
+            if not (encounter_start_date and encounter_start_date == requested_date):
+                continue
+
+        # selection_mode == "all" just falls through and includes everything
+        views.append(
+            _build_view(
+                props, identity, labels, element_id,
+                encounter_start_str, encounter_start_date
+            )
+        )
 
     return views
-

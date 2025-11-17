@@ -1108,7 +1108,8 @@ Each encounter view typically contains:
 - ned_entities: list of entities with ICD mappings
   (icd_id, icd_label, confidence, linking_rationale, etc.).
 - filters: an optional object that may include:
-  - encounter_date_requested: the date used to filter encounters (if any).
+  - selection_mode: "all", "date", or "latest".
+  - encounter_date_requested: the date string (e.g. "2024-01-10") or "latest".
   - encounter_start_date_parsed: the parsed Encounter.period.start for that view.
 
 STRICT REQUIREMENTS:
@@ -1131,13 +1132,21 @@ STRICT REQUIREMENTS:
    - For encounter fields, explain them clinically (e.g., ambulatory visit, discharge home).
    - For ICD and NLP-derived fields, relate them back to the clinical picture.
 
-4. Handling multiple encounters / dates:
-   - If a "filters" object with encounter_date_requested is present and non-null:
-       - Explicitly state that the explanation is limited to encounters on that date.
+4. Handling multiple encounters / selection modes:
+   - For each encounter view, check its "filters" object if present.
+   - If filters.selection_mode is "date":
+       - Explicitly state that the explanation (or that part of it) is limited to
+         encounters on the requested date (filters.encounter_date_requested).
        - Make clear which encounter dates you are using (from encounter.period_start).
-   - If no encounter_date_requested is present (or it is null) and there are multiple encounters:
-       - Summarize the clinical picture across the available encounters.
-       - When relevant, distinguish encounters by date (e.g., “In the most recent encounter on 2024-01-10…”).
+   - If filters.selection_mode is "latest":
+       - Explicitly state that you are describing the latest documented encounter
+         in the data, and give its date based on encounter.period_start or
+         filters.encounter_start_date_parsed.
+   - If filters.selection_mode is "all" or filters is absent:
+       - Treat the explanation as summarizing the clinical picture across all
+         available encounters in the JSON.
+       - When relevant, distinguish encounters by date
+         (e.g., “In the most recent encounter on 2024-01-10…”).
    - Always address the clinician’s question in light of which encounters are included.
 
 5. Handling NER / NED entities:
@@ -1176,7 +1185,8 @@ STRICT REQUIREMENTS:
 8. Organization:
    - Start with a 1–3 sentence overview summarizing the key clinical picture for this patient.
      - If multiple encounters are present, this overview should summarize the overall picture
-       across those encounters and, when relevant, mention the date range.
+       across those encounters and, when relevant, mention whether you are focusing on a
+       specific date or on the latest encounter.
    - Then provide structured details, grouped, for example, as:
        - Presenting problem and course (chief complaint, course_trend, narrative).
        - Examination and investigations (observations, diagnostic_report, procedure).
@@ -1215,8 +1225,9 @@ Answer:
  - Uses all clinically meaningful properties from the data (across all included encounters),
  - Clearly marks whether each piece of information comes from the patient data
    or from general medical knowledge,
- - Clearly indicates which encounter dates the explanation is based on, especially if
-   a filter date (encounter_date_requested) is present in the filters.>
+ - Clearly indicates which encounter dates and selection mode the explanation is based on,
+   using any available "filters" fields (selection_mode, encounter_date_requested,
+   encounter_start_date_parsed).>
 
 Do not write anything else.
 
@@ -1229,6 +1240,7 @@ Patient Data (JSON):
 {{ patient_json }}
 """
 }
+
 
 
 

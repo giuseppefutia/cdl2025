@@ -111,7 +111,16 @@ class GeneralMedicalResponse(BaseModel):
 class PatientInfoInput(BaseModel):
     patient_id: str
     question: str
-    encounter_date: Optional[date] = None
+    # Optional selector: ISO date (YYYY-MM-DD) or "latest"
+    encounter_date: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional encounter selector. "
+            "Use 'YYYY-MM-DD' for a specific Encounter.period.start date, "
+            "or 'latest' to use the most recent encounter. "
+            "If omitted, all encounters will be included."
+        ),
+    )
 
 class PatientCoverageInput(BaseModel):
     patient_id: str

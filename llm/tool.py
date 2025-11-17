@@ -1,5 +1,6 @@
+from datetime import date
 import json
-from typing import List
+from typing import List, Optional
 
 from langchain_core.tools import tool
 from langchain_neo4j import Neo4jGraph
@@ -30,7 +31,7 @@ from llm.chain import (
 )
 
 from llm.pipeline import text2cypher_pipeline, enhanced_graph
-from llm.pipeline_patient import get_patient_view
+from llm.pipeline_patient import get_patient_views
 from llm.query_factory import rank_diseases_for_patient
 
 
@@ -144,23 +145,34 @@ def build_general_medical_tool(llm: ChatOpenAI, debug: bool = False):
 def build_patient_info_tool(llm: ChatOpenAI):
     """
     Build a LangChain tool that:
-      - Fetches the virtualized patient data from Neo4j (via get_patient_view)
-      - Serializes it as JSON
+      - Fetches the virtualized patient data from Neo4j (via get_patient_views)
+      - Serializes it as JSON (list of encounter views)
       - Passes it and the clinician's question to get_patient_answer_chain
       - Returns a structured answer
     """
     explain_chain = get_patient_answer_chain(llm)
 
     @tool("patient_info", args_schema=PatientInfoInput)
-    def patient_info_tool(patient_id: str, question: str):
-        """Explain a patient's virtualized Neo4j 'Patient' node in clinician-friendly language."""
-        patient_view = get_patient_view(patient_id)
+    def patient_info_tool(
+        patient_id: str,
+        question: str,
+        encounter_date: Optional[date] = None,
+    ):
+        """
+        Explain a patient's virtualized Neo4j 'Patient' node in clinician-friendly
+        language. If encounter_date is provided, restrict to that date; otherwise
+        include all encounters for the patient.
+        """
+        patient_views = get_patient_views(
+            patient_id=patient_id,
+            encounter_date=encounter_date,
+        )
 
-        if patient_view is None:
-            patient_json = "{}"
+        if not patient_views:
+            patient_json = "[]"
             has_data = False
         else:
-            patient_json = json.dumps(patient_view, ensure_ascii=False, indent=2)
+            patient_json = json.dumps(patient_views, ensure_ascii=False, indent=2)
             has_data = True
 
         answer = explain_chain.invoke(
@@ -173,9 +185,12 @@ def build_patient_info_tool(llm: ChatOpenAI):
         return {
             "patient_id": patient_id,
             "question": question,
+            "encounter_date": (
+                encounter_date.isoformat() if encounter_date else None
+            ),
             "has_data": has_data,
             "answer": answer,
-            "raw_patient_view": patient_view,
+            "raw_patient_view": patient_views,
         }
 
     return patient_info_tool

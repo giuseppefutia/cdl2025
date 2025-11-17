@@ -1,4 +1,5 @@
 
+from datetime import date
 from typing import Any, Dict, Literal, List, Optional
 from pydantic import BaseModel, Field
 
@@ -76,13 +77,6 @@ class PatientNEDResponse(PatientNEREntity):
 ### Query Models ###
 ####################
 
-"""
-class Property(BaseModel):
-    node_label: str
-    property_key: str
-    property_value: str
-"""
-
 class GuardrailsDecision(BaseModel):
     decision: Literal["continue", "end"]
     reason: Optional[str] = None
@@ -117,6 +111,7 @@ class GeneralMedicalResponse(BaseModel):
 class PatientInfoInput(BaseModel):
     patient_id: str
     question: str
+    encounter_date: Optional[date] = None
 
 class PatientCoverageInput(BaseModel):
     patient_id: str

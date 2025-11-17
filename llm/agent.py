@@ -378,6 +378,8 @@ if __name__ == "__main__":
     # NEW: patient-info style query
     # q = "For patient P003, summarize the diagnosis, key findings, and treatment that are documented in the data."
 
+    # q = "Provide me details on the follow up plan of patient P003 in the latest encounter."
+
     out = run_agent(q)
     print(json.dumps(out, indent=2, ensure_ascii=False))
 

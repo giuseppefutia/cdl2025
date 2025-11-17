@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
@@ -8,6 +8,8 @@ from llm.chain import (
     get_guardrails_chain,
     get_final_answer_chain,
 )
+
+from llm.tool import build_patient_info_tool
 
 from llm.query_factory import (
     get_patient_icd_codes,
@@ -27,7 +29,7 @@ class AgentState(TypedDict, total=False):
     target_ids: List[str]
     results: Any
     steps: List[str]
-    mode: str  # "stepwise" or "text2cypher"
+    mode: str  # "stepwise", "text2cypher", or "patient_info"
     error: Optional[str]
     final_answer: str
 
@@ -35,6 +37,21 @@ class AgentState(TypedDict, total=False):
 ############################
 ### Node implementations ###
 ############################
+
+llm = ChatOpenAI(
+    api_key="EMPTY",
+    base_url="https://chatcompletion-uncognizable-nilda.ngrok-free.dev/v1",
+    model_name="google/medgemma-4b-it",
+    temperature=0,
+    max_tokens=24000,
+    top_p=0.9,
+    stop=["<end_of_turn>", "</s>", "\nUser:", "\n\nUser:"],
+    frequency_penalty=0.2,
+    presence_penalty=0.0,
+)
+
+patient_info_tool = build_patient_info_tool(llm)
+
 
 def node_guardrails(state: AgentState) -> AgentState:
     guard = get_guardrails_chain(llm).invoke({"question": state.get("question")})
@@ -117,6 +134,35 @@ def node_rollup(state: AgentState) -> AgentState:
         }
 
 
+def node_patient_info(state: AgentState) -> AgentState:
+    """Use the patient_info tool to explain the virtualized patient node."""
+    pid = state.get("patient_id")
+    if not pid:
+        # Defensive fallback
+        return {
+            **state,
+            "error": "patient_info node called without patient_id",
+            "steps": [*(state.get("steps") or []), "patient_info"],
+            "results": None,
+            "final_answer": "No patient_id was found in the question, so I cannot retrieve patient data.",
+            "mode": "patient_info",
+        }
+
+    tool_result = patient_info_tool.invoke({
+        "patient_id": pid,
+        "question": state.get("question", ""),
+    })
+
+    # tool_result["answer"] is already a clinician-ready "Answer: ..." block
+    return {
+        **state,
+        "results": tool_result,
+        "final_answer": tool_result.get("answer"),
+        "mode": "patient_info",
+        "steps": [*(state.get("steps") or []), "patient_info"],
+    }
+
+
 def node_coverage(state: AgentState) -> AgentState:
     try:
         results = compute_coverage(state.get("target_ids") or [], limit=20)
@@ -135,7 +181,7 @@ def node_coverage(state: AgentState) -> AgentState:
 
 def node_fallback_text2cypher(state: AgentState) -> AgentState:
     """Run the monolithic path if stepwise path lacks required inputs."""
-    cypher, recs = text2cypher_pipeline(llm,state.get("question", ""))
+    cypher, recs = text2cypher_pipeline(llm, state.get("question", ""))
     return {
         **state,
         "mode": "text2cypher",
@@ -181,6 +227,7 @@ def build_graph() -> Any:
     graph.add_node("get_icd", node_get_icd)
     graph.add_node("icd_to_hpo", node_icd_to_hpo)
     graph.add_node("rollup", node_rollup)
+    graph.add_node("patient_info", node_patient_info)
     graph.add_node("coverage", node_coverage)
     graph.add_node("fallback", node_fallback_text2cypher)
     graph.add_node("finalize", node_finalize)
@@ -191,14 +238,55 @@ def build_graph() -> Any:
     # Edges (stepwise path)
     graph.add_edge("guardrails", "extract")
 
-    # If we couldn't parse a patient_id, go to fallback
-    def have_pid(state: AgentState) -> str:
-        return "get_icd" if state.get("patient_id") else "fallback"
+    # NEW: richer router after extract
+    def route_after_extract(state: AgentState) -> str:
+        q = (state.get("question") or "").lower()
+        pid = state.get("patient_id")
+
+        if not pid:
+            # No patient_id → we can’t do patient-centric or ICD-centric path, use fallback
+            return "fallback"
+
+        # Heuristic keywords that suggest “explain this patient” rather than “phenotype coverage”
+        patient_info_keywords = [
+            "summarize",
+            "summary",
+            "presentation",
+            "findings",
+            "what is documented",
+            "documented",
+            "treatment",
+            "therapy",
+            "follow-up",
+            "follow up",
+            "vitals",
+            "narrative",
+            "exam",
+            "examination",
+            "diagnosis",
+            "icd",
+            "clinical picture",
+            "course",
+            "evolution",
+            "nlp",
+            "ner entities",
+            "ned entities",
+        ]
+
+        if any(kw in q for kw in patient_info_keywords):
+            return "patient_info"
+
+        # Otherwise, assume this is your original ICU/HPO coverage-style question
+        return "get_icd"
 
     graph.add_conditional_edges(
         "extract",
-        have_pid,
-        {"get_icd": "get_icd", "fallback": "fallback"},
+        route_after_extract,
+        {
+            "patient_info": "patient_info",
+            "get_icd": "get_icd",
+            "fallback": "fallback",
+        },
     )
 
     # If no ICD codes found, fallback
@@ -237,14 +325,17 @@ def build_graph() -> Any:
     # Fallback then finalize
     graph.add_edge("fallback", "finalize")
 
+    # NEW: patient_info already produces a final clinician answer → go straight to END
+    graph.add_edge("patient_info", END)
+
     # No checkpointer: simple in-memory, one-shot graph
     compiled = graph.compile()
     return compiled
 
 
-############################
-# Public run helper        #
-############################
+#####################
+### Run the Agent ###
+#####################
 
 def run_agent(question: str, *, patient_id: Optional[str] = None) -> Dict[str, Any]:
     """Convenience for invoking the agent programmatically.
@@ -260,6 +351,7 @@ def run_agent(question: str, *, patient_id: Optional[str] = None) -> Dict[str, A
         "mode": "stepwise",
     }
     final_state = compiled.invoke(initial)
+    
     return {
         "steps": final_state.get("steps"),
         "mode": final_state.get("mode", "stepwise"),
@@ -280,9 +372,12 @@ if __name__ == "__main__":
     # Minimal smoke test; relies on your DB contents.
     import json
 
-    q = "Show possible diseases by HPO coverage for patientId:'P003'. Report the covered and the total and a subset of missing HPO names for each disease."
-    # q = "For cystic fibrosis, what symptoms are documented and what is the evidence supporting them?"
-    
+    # Original phenotype/coverage query
+    q = "Show possible diseases by HPO coverage for patientId:'P003'. Report the covered, total, and percentage coverage."
+
+    # NEW: patient-info style query
+    # q = "For patient P003, summarize the diagnosis, key findings, and treatment that are documented in the data."
+
     out = run_agent(q)
     print(json.dumps(out, indent=2, ensure_ascii=False))
 

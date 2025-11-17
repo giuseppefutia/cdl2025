@@ -3,7 +3,6 @@ from langchain_core.prompts import ChatPromptTemplate, SystemMessagePromptTempla
 from langchain_core.output_parsers import StrOutputParser
 
 from llm.prompt import (
-    FINAL_ANSWER_PROMPT,
     ONTOLOGY_MAPPING_PROMPT,
     PATIENT_NER_PROMPT,
     PATIENT_NED_PROMPT,
@@ -13,7 +12,9 @@ from llm.prompt import (
     DIAGNOSE_CYPHER_PROMPT,
     QUERY_CORRECTION_PROMPT,
     CLINICIAN_EXPLANATION_PROMPT,
+    PATIENT_EXPLANATION_PROMPT,
     PATIENT_COVERAGE_PROMPT,
+    FINAL_ANSWER_PROMPT,
 )
 
 from llm.pydantic_model import (
@@ -154,6 +155,20 @@ def clinician_explanation_chain(llm_model: ChatOpenAI):
         ),
         HumanMessagePromptTemplate.from_template(
             CLINICIAN_EXPLANATION_PROMPT["user"],
+            template_format="jinja2",
+        ),
+    ])
+    return prompt | llm_model | StrOutputParser()
+
+
+def get_patient_answer_chain(llm_model: ChatOpenAI):
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(
+            PATIENT_EXPLANATION_PROMPT["system"],
+            template_format="jinja2",
+        ),
+        HumanMessagePromptTemplate.from_template(
+            PATIENT_EXPLANATION_PROMPT["user"],
             template_format="jinja2",
         ),
     ])

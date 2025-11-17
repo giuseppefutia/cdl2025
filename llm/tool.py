@@ -2,12 +2,14 @@ import json
 from typing import List
 
 from langchain_core.tools import tool
+from langchain_neo4j import Neo4jGraph
 from langchain_openai import ChatOpenAI
 
 from llm.prompt import NEO4J_SCHEMA
 
 from llm.pydantic_model import (
     OntologyMappingInput,
+    PatientInfoInput,
     PatientNERInput,
     PatientNEREntity,
     PatientNEDInput,
@@ -15,7 +17,6 @@ from llm.pydantic_model import (
     PatientNEDOtherMention,
     GeneralMedicalInput,
     GeneralMedicalResponse,
-    PatientCoverageInput,
     CoverageRow,
     PatientCoverageResponse,
 )
@@ -24,14 +25,14 @@ from llm.chain import (
     patient_ner_chain,
     patient_ned_chain,
     clinician_explanation_chain,
+    get_patient_answer_chain,
     patient_coverage_chain,
 )
 
 from llm.pipeline import text2cypher_pipeline, enhanced_graph
+from llm.pipeline_patient import get_patient_view
 from llm.query_factory import rank_diseases_for_patient
 
-
-########################
 
 def build_ontology_mapper_tool(llm):
     chain = ontology_mapping_chain(llm)
@@ -138,6 +139,46 @@ def build_general_medical_tool(llm: ChatOpenAI, debug: bool = False):
         ).model_dump()
 
     return general_medical_executor
+
+
+def build_patient_info_tool(llm: ChatOpenAI):
+    """
+    Build a LangChain tool that:
+      - Fetches the virtualized patient data from Neo4j (via get_patient_view)
+      - Serializes it as JSON
+      - Passes it and the clinician's question to get_patient_answer_chain
+      - Returns a structured answer
+    """
+    explain_chain = get_patient_answer_chain(llm)
+
+    @tool("patient_info", args_schema=PatientInfoInput)
+    def patient_info_tool(patient_id: str, question: str):
+        """Explain a patient's virtualized Neo4j 'Patient' node in clinician-friendly language."""
+        patient_view = get_patient_view(patient_id)
+
+        if patient_view is None:
+            patient_json = "{}"
+            has_data = False
+        else:
+            patient_json = json.dumps(patient_view, ensure_ascii=False, indent=2)
+            has_data = True
+
+        answer = explain_chain.invoke(
+            {
+                "question": question,
+                "patient_json": patient_json,
+            }
+        )
+
+        return {
+            "patient_id": patient_id,
+            "question": question,
+            "has_data": has_data,
+            "answer": answer,
+            "raw_patient_view": patient_view,
+        }
+
+    return patient_info_tool
 
 
 def build_patient_coverage_tool(llm: ChatOpenAI):

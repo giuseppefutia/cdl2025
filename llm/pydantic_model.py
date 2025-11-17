@@ -114,6 +114,10 @@ class GeneralMedicalResponse(BaseModel):
 ### Patient Models ###
 ######################
 
+class PatientInfoInput(BaseModel):
+    patient_id: str
+    question: str
+
 class PatientCoverageInput(BaseModel):
     patient_id: str
     limit: int = 20

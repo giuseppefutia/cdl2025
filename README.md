@@ -1,87 +1,176 @@
 # cdl2025
 
-To install all the required Python libraries, you can create a virtual environment as follows:
+![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
+![Python Version](https://img.shields.io/badge/python-3.10+-blue)
+![Neo4j](https://img.shields.io/badge/neo4j-supported-orange)
+![License](https://img.shields.io/badge/license-TBD-lightgrey)
 
-```bash
+`cdl2025` provides tools and pipelines for importing clinical ontologies
+(ICD10, HPO, UMLS) into a Neo4j graph database, computing ontology
+embeddings, and integrating patient-generated data for downstream
+analytics.
+
+------------------------------------------------------------------------
+
+## Table of Contents
+
+-   [Overview](#overview)
+-   [Installation](#installation)
+-   [Data Pipeline](#data-pipeline)
+    -   [ICD10 Import](#icd10-import)
+    -   [HPO Import](#hpo-import)
+    -   [UMLS Concept Mapping](#umls-concept-mapping)
+    -   [Patient Data](#patient-data)
+-   [Import Commands](#import-commands)
+-   [Neo4j & APOC Virtualization](#neo4j--apoc-virtualization)
+-   [Contributing](#contributing)
+-   [License](#license)
+
+------------------------------------------------------------------------
+
+## Overview
+
+This project supports:
+
+-   Loading ICD10 codes, chapters, groups, and embeddings
+-   Loading HPO ontology and embeddings
+-   Mapping UMLS concepts to ICD10 and HPO
+-   Ingesting patient-generated annotations
+-   Creating virtualized views in Neo4j via APOC Data Virtualization
+
+------------------------------------------------------------------------
+
+## Installation
+
+Create and activate a Python virtual environment:
+
+``` bash
 virtualenv -p python3 venv
 source venv/bin/activate
 pip install -r requirements.lock
 ```
 
-## Download
-TODO
+------------------------------------------------------------------------
 
-## Data
-TODO
+## Data Pipeline
 
-### Import ICD10 Code Dataset
+### ICD10 Import
 
-Import ICD10 code diseases and their hierarchical connections:
+The ICD10 pipeline loads:
 
-```bash
+-   Disease codes + hierarchy\
+-   Chapters\
+-   Groups\
+-   Embeddings
+
+### HPO Import
+
+The HPO pipeline loads:
+
+-   The full HPO ontology\
+-   Precomputed HPO embeddings
+
+### UMLS Concept Mapping
+
+Maps UMLS concepts (from `MRCONSO.RRF`) to:
+
+-   ICD10 Codes\
+-   HPO Terms
+
+### Patient Data
+
+Import patient-generated annotations (CSV-format).\
+**TODO:** Add schema specification and examples.
+
+------------------------------------------------------------------------
+
+## Import Commands
+
+### ICD10 Codes
+
+``` bash
 python -m factory.icd10 --backend neo4j --file icd102019syst_codes.txt
 ```
 
-Import ICD10 chapters and their connections with diseases:
+### ICD10 Chapters
 
-```bash
+``` bash
 python -m factory.icd10_chapter --backend neo4j --file icd102019syst_chapters.txt
 ```
 
-Import ICD10 groups and their connections with chapters and diseases:
+### ICD10 Groups
 
-```bash
+``` bash
 python -m factory.icd10_group --backend neo4j --file icd102019syst_groups.txt
 ```
 
-Import ICD10 embeddings:
+### ICD10 Embeddings
 
-```bash
+``` bash
 python -m factory.icd10_embedding --backend neo4j
 ```
 
-### Import the HPO Ontology Dataset
+------------------------------------------------------------------------
 
-Import HPO ontology:
+### HPO Ontology
 
-```bash
+``` bash
 python -m factory.hpo --backend neo4j
 ```
 
-Import HPO embeddings:
+### HPO Embeddings
 
-```bash
+``` bash
 python -m factory.hpo_embedding --backend neo4j
 ```
 
-### Map UMLS concept to ICD10 and HPO Ontologies
+------------------------------------------------------------------------
 
-```bash
+### UMLS Mapping
+
+``` bash
 python -m factory.umls_map --backend neo4j --file MRCONSO.RRF
 ```
 
-### Patient-generated Data
-TODO
+------------------------------------------------------------------------
 
-## Import
-TODO
+### Patient Annotation Import
 
-```bash
+``` bash
 python -m factory.patient_annotation --backend neo4j --file patient03.csv
 ```
 
-# Virtualization
+------------------------------------------------------------------------
 
-Download the release: https://github.com/neo4j-contrib/neo4j-apoc-procedures/releases/5.26.0
+# Neo4j & APOC Virtualization
 
-In the neo4j.conf
-dbms.security.procedures.unrestricted=apoc.*
-dbms.security.procedures.allowlist=apoc.*
+### 1. Download APOC
 
-In the apoc.conf file
-apoc.import.file.enabled=true
-apoc.import.file.use_neo4j_config=true
+Download the appropriate release:
 
+<https://github.com/neo4j-contrib/neo4j-apoc-procedures/releases/5.26.0>
+
+Place it in Neo4j's `plugins/` directory.
+
+------------------------------------------------------------------------
+
+### 2. Update `neo4j.conf`
+
+    dbms.security.procedures.unrestricted=apoc.*
+    dbms.security.procedures.allowlist=apoc.*
+
+------------------------------------------------------------------------
+
+### 3. Update `apoc.conf`
+
+    apoc.import.file.enabled=true
+    apoc.import.file.use_neo4j_config=true
+
+------------------------------------------------------------------------
+
+### 4. Example: Install a Virtual CSV Source
+
+``` cypher
 CALL apoc.dv.catalog.install(
   "patient", "cdl2025",
   {
@@ -92,16 +181,13 @@ CALL apoc.dv.catalog.install(
     desc: "Patient details with patientId"
   }
 );
+```
 
+------------------------------------------------------------------------
 
+## Contributing
 
-## Utilities for Understanding
-* https://chatgpt.com/c/6904bb2f-21d0-8332-913f-aae184bcf8f6
-* https://chatgpt.com/c/6904beb2-04fc-8330-a624-5f6d51eab2b4
-* https://huggingface.co/Alibaba-NLP/gte-Qwen2-7B-instruct
-* https://chatgpt.com/c/6904b843-21ac-8329-91dc-641d69f14427
-* https://chatgpt.com/c/6904a4f1-3f80-8322-adc0-21bc0c481a43
-* https://chatgpt.com/c/6904a093-1148-8323-9f49-881ece410edb
-* https://github.com/JHnlp/BioCreative-V-CDR-Corpus (Useful for the evaluation)
-* https://chatgpt.com/c/69048b84-dc0c-832a-abf6-e0d275dcbc4a
-* AGENT: https://chatgpt.com/c/690ddcc1-af80-832a-8ea2-0de50c5114e6
+Pull requests are welcome!\
+Please use feature branches and follow existing module patterns.
+
+------------------------------------------------------------------------

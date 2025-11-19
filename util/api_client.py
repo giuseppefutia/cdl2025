@@ -65,7 +65,6 @@ class ApiClient:
     """
     def __init__(self, base_url: str, auth_token: str | None = None):
         self.base_url = base_url.rstrip("/")
-        print( "Base URL set to:", self.base_url)
         self.auth_headers = {"Authorization": f"Bearer {auth_token}"} if auth_token else {}
 
     def _url(self, path: str, query: dict | None = None) -> str:

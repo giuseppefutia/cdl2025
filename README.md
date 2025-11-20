@@ -1,14 +1,11 @@
 # cdl2025
 
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
-![Python Version](https://img.shields.io/badge/python-3.10+-blue)
-![Neo4j](https://img.shields.io/badge/neo4j-supported-orange)
-![License](https://img.shields.io/badge/license-TBD-lightgrey)
-
 `cdl2025` provides tools and pipelines for importing clinical ontologies
 (ICD10, HPO, UMLS) into a Neo4j graph database, computing ontology
 embeddings, and integrating patient-generated data for downstream
 analytics.
+
+Slides of the masterclass: [Google Drive](https://docs.google.com/presentation/d/1SCPnt3lXVT2C6ZjqYMRbfCXfkK5NEPQ4/edit?usp=sharing&ouid=112517546961694752607&rtpof=true&sd=true)
 
 ------------------------------------------------------------------------
 
